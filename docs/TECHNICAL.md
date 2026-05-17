@@ -3,6 +3,20 @@
 本文档详述 `cgns2foam` 从 CGNS（HDF5）到 OpenFOAM `polyMesh` 的完整
 转换过程：数据模型、关键算法、文件二进制布局、已知限制以及扩展指引。
 
+**目标 OpenFOAM 发行版**：openfoam.com 的 **v2412**（ESI/OpenCFD）。
+我们没有对 openfoam.org 的 Foundation 版本（11/12/13 等）做兼容；
+两者在以下几个地方有不同的 polyMesh I/O 期望（详见 §2 / §4）：
+
+| 文件 / 配置项                       | openfoam.com v2412               | openfoam.org 13                  |
+|-------------------------------------|----------------------------------|----------------------------------|
+| `cellZones` 的 `class` 头           | `regIOobject`                    | `cellZoneList`                   |
+| `faceZones` 的 `class` 头           | `regIOobject`                    | `faceZoneList`                   |
+| `controlDict` 的 `writeCompression` | `on`/`off`                       | `compressed`/`uncompressed`      |
+| `system/fvSchemes`/`fvSolution`     | **必需**（即使只跑 `checkMesh`） | 启动 `checkMesh` 时可以缺失      |
+
+我们的 writer 完全按 v2412 的期望产出。如果以后需要兼容 Foundation
+版本，把上述 3 处头部 / 关键字改一改即可。
+
 ---
 
 ## 1. CGNS（HDF5）数据模型简述
@@ -164,10 +178,12 @@ OpenFOAM 要求：
 | `constant/polyMesh/owner`             | 每个面所属 owner cell id（二进制 labelList）       |
 | `constant/polyMesh/neighbour`         | 每个内部面的 neighbour cell id（二进制 labelList）|
 | `constant/polyMesh/boundary`          | patch 字典（ASCII）                                |
-| `constant/polyMesh/cellZones`         | 每个 CGNS zone 对应一个 cellZone（ASCII + 内嵌二进制 label list）|
-| `constant/polyMesh/faceZones`         | 空（与 ANSA 输出保持一致）                        |
+| `constant/polyMesh/cellZones`         | 每个 CGNS zone 对应一个 cellZone（ASCII + 内嵌二进制 label list，`class regIOobject`）|
+| `constant/polyMesh/faceZones`         | 空（`class regIOobject`，与 ANSA 输出保持一致）   |
 | `constant/turbulenceProperties`       | `simulationType RAS;` 默认 `laminar`              |
-| `system/controlDict`                  | `application UserSolver;` 占位（用户改成实际求解器）|
+| `system/controlDict`                  | `application UserSolver;` 占位、`writeCompression off;`（用户改成实际求解器）|
+| `system/fvSchemes`                    | 最小占位（v2412 启动时必需）                       |
+| `system/fvSolution`                   | 最小占位（v2412 启动时必需）                       |
 | `0/U`                                 | 体积矢量场，默认 `(0 0 0)`、墙面 `fixedValue`     |
 | `0/p`, `0/p_rgh`                      | 体积标量场，默认 `0`、墙面 `zeroGradient`         |
 
@@ -176,7 +192,7 @@ OpenFOAM 要求：
 
 ---
 
-## 5. 与 ANSA 25.1 输出的对比
+## 5. 与 ANSA 25.1 输出的对比（OpenFOAM v2412）
 
 `tests/run_all.py` 会把 `cgns2foam` 的输出和 `cases/*/*.zip` 里 ANSA
 产生的参考工程做以下比较（拓扑不变量）：
@@ -184,7 +200,12 @@ OpenFOAM 要求：
 - `nPoints` / `nFaces` / `nInternalFaces` / `nCells`
 - 边界面总数 / 各 patch 面数之和
 
-实测结果：
+`--with-checkmesh` 会调用 OpenFOAM v2412 的 `checkMesh`。由于 ANSA 的
+参考压缩包没有 `system/fvSchemes` / `fvSolution`（v2412 要求两者），
+测试脚本会把我们生成的两个最小占位文件复制到参考目录之后再跑
+`checkMesh`，确保两边在同一条件下比较。
+
+实测结果（OpenFOAM v2412 patch 260127，2026-05）：
 
 | Case               | 拓扑不变量 | `checkMesh` 我们 | `checkMesh` ANSA |
 |--------------------|-----------|------------------|------------------|
@@ -221,6 +242,10 @@ OpenFOAM 要求：
 5. **只用 32-bit label**：超过 ≈21 亿单元/面/点的网格需要切换到
    `WM_LABEL_SIZE=64` 编译的 OpenFOAM；改写代价是把 `writer.py` 里
    `int32` 改为 `int64`。
+6. **仅针对 openfoam.com v2412**：openfoam.org 11/12/13 等 Foundation
+   版本对 `cellZones` / `faceZones` 头部、`writeCompression` 关键字、
+   以及是否需要 `fvSchemes`/`fvSolution` 期望不同；如需兼容请按 §0
+   的对照表调整 `writer.py` 中的相应字段。
 
 ---
 

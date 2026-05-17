@@ -221,8 +221,11 @@ def _write_boundary(path: str, mesh: Mesh, source: str) -> None:
 
 
 def _write_cell_zones(path: str, mesh: Mesh, source: str) -> None:
+    # OpenFOAM v2412 (openfoam.com) expects ``class regIOobject`` here;
+    # the openfoam.org branch uses ``cellZoneList`` instead.  We target
+    # v2412, which is also what ANSA emits.
     with open(path, "wb") as fh:
-        fh.write(_full_header(source, "cellZoneList", "cellZones",
+        fh.write(_full_header(source, "regIOobject", "cellZones",
                               location="constant/polyMesh"))
         # Filter out empty zones
         zones = [z for z in mesh.cell_zones if z.cell_labels.size > 0]
@@ -237,9 +240,9 @@ def _write_cell_zones(path: str, mesh: Mesh, source: str) -> None:
 
 
 def _write_face_zones(path: str, source: str) -> None:
-    """Empty faceZones – kept for consistency with reference output."""
+    """Empty faceZones – kept for consistency with the ANSA reference."""
     with open(path, "wb") as fh:
-        fh.write(_full_header(source, "faceZoneList", "faceZones", fmt="ascii",
+        fh.write(_full_header(source, "regIOobject", "faceZones", fmt="ascii",
                               location="constant/polyMesh"))
         fh.write(b"\n0\n(\n)\n")
 
@@ -262,7 +265,7 @@ def _write_control_dict(path: str, source: str) -> None:
         "purgeWrite\t0;\n\n"
         "writeFormat\tbinary;\n\n"
         "writePrecision\t6;\n\n"
-        "writeCompression\tuncompressed;\n\n"
+        "writeCompression\toff;\n\n"
         "timeFormat\tgeneral;\n\n"
         "timePrecision\t6;\n\n"
         "graphFormat\traw;\n\n"
@@ -279,7 +282,43 @@ def _write_control_dict(path: str, source: str) -> None:
         fh.write(body.encode("ascii"))
 
 
+def _write_fv_schemes(path: str, source: str) -> None:
+    """Minimal ``system/fvSchemes`` accepted by OpenFOAM v2412.
+
+    Required even for ``checkMesh``; users should replace the entries
+    with solver-appropriate schemes before running a simulation.
+    """
+    body = (
+        "\nddtSchemes\n{\n\tdefault\tsteadyState;\n}\n\n"
+        "gradSchemes\n{\n\tdefault\tGauss linear;\n}\n\n"
+        "divSchemes\n{\n\tdefault\tnone;\n}\n\n"
+        "laplacianSchemes\n{\n\tdefault\tGauss linear corrected;\n}\n\n"
+        "interpolationSchemes\n{\n\tdefault\tlinear;\n}\n\n"
+        "snGradSchemes\n{\n\tdefault\tcorrected;\n}\n\n"
+        "wallDist\n{\n\tmethod\tmeshWave;\n}\n"
+    )
+    with open(path, "wb") as fh:
+        fh.write(_full_header(source, "dictionary", "fvSchemes", fmt="ascii",
+                              location="system"))
+        fh.write(body.encode("ascii"))
+
+
+def _write_fv_solution(path: str, source: str) -> None:
+    """Minimal ``system/fvSolution``."""
+    body = (
+        "\nsolvers\n{\n}\n\n"
+        "SIMPLE\n{\n\tnNonOrthogonalCorrectors\t0;\n}\n"
+    )
+    with open(path, "wb") as fh:
+        fh.write(_full_header(source, "dictionary", "fvSolution", fmt="ascii",
+                              location="system"))
+        fh.write(body.encode("ascii"))
+
+
 def _write_turbulence_properties(path: str, source: str) -> None:
+    # OpenFOAM v2412 accepts the long form ``simulationType RAS; RAS { … }``
+    # which we keep here for parity with the ANSA reference.  The shorter
+    # ``simulationType laminar;`` form is equally valid in v2412.
     body = (
         "\nsimulationType RAS;\n\n"
         "RAS\n{\n"
@@ -388,6 +427,8 @@ def write_case(out_dir: str, mesh: Mesh, source_path: str) -> None:
     _write_face_zones(os.path.join(poly, "faceZones"), source_path)
 
     _write_control_dict(os.path.join(sysd, "controlDict"), source_path)
+    _write_fv_schemes(os.path.join(sysd, "fvSchemes"), source_path)
+    _write_fv_solution(os.path.join(sysd, "fvSolution"), source_path)
     _write_turbulence_properties(
         os.path.join(cstd, "turbulenceProperties"), source_path
     )
