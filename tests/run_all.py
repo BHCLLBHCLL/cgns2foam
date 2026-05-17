@@ -91,11 +91,29 @@ def _extract_reference(zip_path: str, target_root: str) -> str:
     raise FileNotFoundError(f"polyMesh not found under {out}")
 
 
+_OPENFOAM_BASHRC_CANDIDATES = [
+    # OpenFOAM v2412 / v2506 / … from openfoam.com (apt or tarball)
+    "/usr/lib/openfoam/openfoam2412/etc/bashrc",
+    "/usr/lib/openfoam/openfoam2506/etc/bashrc",
+    "/opt/openfoam2412/etc/bashrc",
+    "/opt/OpenFOAM-v2412/etc/bashrc",
+    # Generic environment variable
+    os.environ.get("FOAM_BASHRC", "") or "/dev/null",
+]
+
+
+def _foam_bashrc() -> str | None:
+    for c in _OPENFOAM_BASHRC_CANDIDATES:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
 def _run_check_mesh(case_dir: str, log_path: str) -> str:
     """Run ``checkMesh`` and return a one-line verdict."""
-    fbash = "/opt/openfoam13/etc/bashrc"
-    if not os.path.isfile(fbash):
-        return "checkMesh not available"
+    fbash = _foam_bashrc()
+    if fbash is None:
+        return "checkMesh not available (no OpenFOAM v2412 bashrc found)"
     cmd = f"source {fbash} > /dev/null 2>&1 && cd {case_dir} && checkMesh -allTopology"
     try:
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
@@ -194,6 +212,16 @@ def main(argv: list[str] | None = None) -> int:
             verdict = _run_check_mesh(str(out_case), str(log_path))
             summary.append(f"   checkMesh ours: {verdict}  (log: {log_path})")
             if ref_dir:
+                # The ANSA reference doesn't ship fvSchemes/fvSolution but
+                # OpenFOAM v2412's checkMesh requires them, so we copy ours
+                # into the reference tree before running checkMesh.
+                ref_sys = Path(ref_dir) / "system"
+                ref_sys.mkdir(exist_ok=True)
+                for f in ("fvSchemes", "fvSolution"):
+                    src = out_case / "system" / f
+                    dst = ref_sys / f
+                    if src.is_file() and not dst.is_file():
+                        shutil.copy2(src, dst)
                 ref_log = out_root / "logs" / f"{name}.checkMesh.ref.log"
                 ref_verdict = _run_check_mesh(ref_dir, str(ref_log))
                 summary.append(f"   checkMesh ref : {ref_verdict}  (log: {ref_log})")
