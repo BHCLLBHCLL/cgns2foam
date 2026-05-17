@@ -25,7 +25,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 
-from cgns2foam.convert import convert_file        # noqa: E402
+from src.convert import convert_file              # noqa: E402
 from validate import (                            # noqa: E402
     read_boundary,
     read_faces_any,

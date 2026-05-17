@@ -1,4 +1,9 @@
-"""CLI entry point: ``python -m cgns2foam <input.cgns> [output_dir]``."""
+"""CLI entry point: ``python -m src <input.cgns> [output_dir]``.
+
+The package is imported as ``src`` because the source directory at
+the repository root is named ``src/``; the CLI program name is still
+``cgns2foam`` for user-facing messages.
+"""
 
 from __future__ import annotations
 

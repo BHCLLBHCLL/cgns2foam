@@ -4,7 +4,11 @@ This package provides a pure-Python converter that reads CGNS files
 (stored in the HDF5/CPEX 0001 layout) using only ``h5py`` and ``numpy``
 as runtime dependencies, and writes a complete OpenFOAM case directory.
 
-Public entry point: :func:`cgns2foam.convert.convert_file`.
+The Python package lives in the ``src/`` directory; import paths are
+``src.convert``, ``src.reader`` … and the CLI is invoked as
+``python -m src``.
+
+Public entry point: :func:`src.convert.convert_file`.
 """
 
 from .convert import convert_file  # noqa: F401

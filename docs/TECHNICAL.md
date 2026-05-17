@@ -1,7 +1,9 @@
 # cgns2foam 技术文档
 
-本文档详述 `cgns2foam` 从 CGNS（HDF5）到 OpenFOAM `polyMesh` 的完整
-转换过程：数据模型、关键算法、文件二进制布局、已知限制以及扩展指引。
+本文档详述 **cgns2foam** 项目从 CGNS（HDF5）到 OpenFOAM `polyMesh` 的
+完整转换过程：数据模型、关键算法、文件二进制布局、已知限制以及扩展
+指引。源代码统一放在仓库根目录下的 `src/` 包里（Python 导入名为
+`src`，CLI 通过 `python -m src` 调用），项目品牌名仍为 cgns2foam。
 
 **目标 OpenFOAM 发行版**：openfoam.com 的 **v2412**（ESI/OpenCFD）。
 我们没有对 openfoam.org 的 Foundation 版本（11/12/13 等）做兼容；
@@ -33,7 +35,7 @@ CGNS 的 HDF5 编码遵循 CPEX 0001（SIDS-to-HDF5 mapping）。其核心规则
 
 也就是说，要读取某个 CGNS 节点的实际数据，写的是
 `group[" data"][()]`，而不是 `group["data"][()]`。`cgns2foam`
-在 `reader.py` 里封装了这一约定。
+在 `src/reader.py` 里封装了这一约定。
 
 ### 1.1 我们关心的节点类型
 
@@ -58,7 +60,7 @@ CGNS 的 HDF5 编码遵循 CPEX 0001（SIDS-to-HDF5 mapping）。其核心规则
 
 固定形状的单元段（`TETRA_4`、`PYRA_5`、`PENTA_6`、`HEXA_8`）也能被
 读取并按 CGNS SIDS §11.2 的局部面定义自动展开成等价的 NGON/NFACE，详见
-`topology._ngon_from_fixed`。
+`src/topology.py::_ngon_from_fixed`。
 
 ---
 
@@ -125,9 +127,9 @@ neighbour     :  <header>\n M \n ( <M*4 bytes int32> ) \n     (M = nInternalFace
    `PointList` 中的 1 基面 id 转 0 基，过滤掉非边界面 id（即误把内部面
    写进 BC 的情况）。
 
-### 3.2 多 zone 合并（`build_mesh`）
+### 3.2 多 zone 合并（`src/topology.py::build_mesh`）
 
-`cgns2foam` 采用 **不做几何 stitching** 的合并策略：
+cgns2foam 采用 **不做几何 stitching** 的合并策略：
 
 - 顶点 / 单元 / 面分别拼接，分别加上跨 zone 偏移。
 - **每个 CGNS zone → 一个 cellZone**，方便后续按子域操作（如 MRF）。
@@ -165,7 +167,7 @@ OpenFOAM 要求：
 | 含 `axis`                    | `empty`             |
 | 其它                          | `patch`             |
 
-映射逻辑在 `topology._bc_type_to_foam`，可按需扩展。
+映射逻辑在 `src/topology.py::_bc_type_to_foam`，可按需扩展。
 
 ---
 
@@ -194,7 +196,7 @@ OpenFOAM 要求：
 
 ## 5. 与 ANSA 25.1 输出的对比（OpenFOAM v2412）
 
-`tests/run_all.py` 会把 `cgns2foam` 的输出和 `cases/*/*.zip` 里 ANSA
+`tests/run_all.py` 会把 cgns2foam 的输出和 `cases/*/*.zip` 里 ANSA
 产生的参考工程做以下比较（拓扑不变量）：
 
 - `nPoints` / `nFaces` / `nInternalFaces` / `nCells`
@@ -251,25 +253,28 @@ OpenFOAM 要求：
 
 ## 7. 扩展点速查
 
-- **加新的 BC 类型映射**：编辑 `topology._bc_type_to_foam`。
-- **改 patch 命名/合并策略**：编辑 `build_mesh` 内的去重 / 默认 patch 段。
-- **写入流场初值**：在 `writer.py` 里仿照 `_write_initial_field` 实现
-  `nonuniform List<scalar>` 二进制写入，并在 `convert.py` 串起来。
+- **加新的 BC 类型映射**：编辑 `src/topology.py::_bc_type_to_foam`。
+- **改 patch 命名/合并策略**：编辑 `src/topology.py::build_mesh` 内的
+  去重 / 默认 patch 段。
+- **写入流场初值**：在 `src/writer.py` 里仿照 `_write_initial_field`
+  实现 `nonuniform List<scalar>` 二进制写入，并在 `src/convert.py` 串
+  起来。
 - **支持固定形状元素的二维（面）段**：扩展
-  `topology._FIXED_CELL_FACES` 以及 `_ngon_from_fixed`。
+  `src/topology.py::_FIXED_CELL_FACES` 以及 `_ngon_from_fixed`。
 
 ---
 
 ## 8. 命令行 / Python API 速查
 
 ```bash
-python3 -m cgns2foam <in.cgns> [out_dir] [-q|--quiet]
+# 在仓库根目录下运行，确保 `src` 包能被 import
+python3 -m src <in.cgns> [out_dir] [-q|--quiet]
 python3 tests/run_all.py [--with-checkmesh] [--out-root /tmp/out]
 python3 -m unittest tests.test_box -v
 ```
 
 ```python
-from cgns2foam import read_cgns, convert_file
+from src import read_cgns, convert_file
 case = read_cgns("in.cgns")          # 仅读取，得到 CGNSCase
 mesh = convert_file("in.cgns", "out")
 # mesh.points / mesh.face_offsets / mesh.face_vertices /
