@@ -19,6 +19,20 @@
 我们的 writer 完全按 v2412 的期望产出。如果以后需要兼容 Foundation
 版本，把上述 3 处头部 / 关键字改一改即可。
 
+**目标 OpenFOAM 发行版**：openfoam.com 的 **v2412**（ESI/OpenCFD）。
+我们没有对 openfoam.org 的 Foundation 版本（11/12/13 等）做兼容；
+两者在以下几个地方有不同的 polyMesh I/O 期望（详见 §2 / §4）：
+
+| 文件 / 配置项                       | openfoam.com v2412               | openfoam.org 13                  |
+|-------------------------------------|----------------------------------|----------------------------------|
+| `cellZones` 的 `class` 头           | `regIOobject`                    | `cellZoneList`                   |
+| `faceZones` 的 `class` 头           | `regIOobject`                    | `faceZoneList`                   |
+| `controlDict` 的 `writeCompression` | `on`/`off`                       | `compressed`/`uncompressed`      |
+| `system/fvSchemes`/`fvSolution`     | **必需**（即使只跑 `checkMesh`） | 启动 `checkMesh` 时可以缺失      |
+
+我们的 writer 完全按 v2412 的期望产出。如果以后需要兼容 Foundation
+版本，把上述 3 处头部 / 关键字改一改即可。
+
 ---
 
 ## 1. CGNS（HDF5）数据模型简述
