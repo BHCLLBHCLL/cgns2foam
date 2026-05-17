@@ -28,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
-from cgns2foam.convert import convert_file  # noqa: E402
+from src.convert import convert_file  # noqa: E402
 
 import numpy as np  # noqa: E402
 

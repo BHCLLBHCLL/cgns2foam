@@ -11,12 +11,12 @@
 ## 目录结构
 
 ```
-cgns2foam/             # 转换器实现
+src/                   # 转换器实现（Python 包，导入名 `src`）
 ├── reader.py          # 基于 h5py 的 CGNS 读取（CPEX-0001 / SIDS-to-HDF5）
 ├── topology.py        # NGON / NFACE → OpenFOAM polyMesh 拓扑与重排
 ├── writer.py          # OpenFOAM polyMesh / system / constant / 0 文件生成
 ├── convert.py         # 高层流水线（reader → topology → writer）
-└── __main__.py        # `python -m cgns2foam` 命令行入口
+└── __main__.py        # `python -m src` 命令行入口
 tests/
 ├── validate.py        # 重新读取写出的二进制网格做对比
 ├── run_all.py         # 三个 case 的端到端跑通脚本（含 checkMesh）
@@ -26,6 +26,10 @@ requirements.txt
 docs/
 └── TECHNICAL.md       # 详细技术文档（数据结构 / 算法 / 限制）
 ```
+
+> 注：项目品牌名仍是 **cgns2foam**（README 标题、文件头 banner、日志
+> 前缀等用户可见处保持不变），仅源码所在目录命名为 `src/`。Python 的
+> 导入名因此是 `src`，CLI 通过 `python -m src` 调用。
 
 ## 安装
 
@@ -38,14 +42,15 @@ python3 -m pip install -r requirements.txt
 ## 快速使用
 
 ```bash
+# 在仓库根目录下运行（保证 `src` 包能被找到）：
 # 基本用法：从 .cgns 文件生成同名 OpenFOAM 工程目录
-python3 -m cgns2foam path/to/case.cgns
+python3 -m src path/to/case.cgns
 
 # 指定输出目录
-python3 -m cgns2foam path/to/case.cgns /tmp/myCase
+python3 -m src path/to/case.cgns /tmp/myCase
 
 # 安静模式（脚本场景）
-python3 -m cgns2foam -q path/to/case.cgns /tmp/myCase
+python3 -m src -q path/to/case.cgns /tmp/myCase
 ```
 
 生成的目录结构为标准 OpenFOAM 工程（v2412 期望布局）：
@@ -73,7 +78,8 @@ myCase/
 ## 在 Python 里调用
 
 ```python
-from cgns2foam import convert_file
+# 仓库根目录加入 sys.path 后即可：
+from src import convert_file
 
 mesh = convert_file("case.cgns", "out_dir", verbose=True)
 print(mesh.n_cells, mesh.owner.size, len(mesh.patches))

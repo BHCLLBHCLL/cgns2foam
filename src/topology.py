@@ -19,7 +19,7 @@ Responsibilities:
   from neighbour to owner.
 
 The intermediate :class:`Mesh` object produced here is consumed by
-:mod:`cgns2foam.writer`.
+:mod:`src.writer`.
 """
 
 from __future__ import annotations

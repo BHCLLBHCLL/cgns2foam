@@ -13,7 +13,7 @@ from .writer import write_case
 def convert_file(cgns_path: str, out_dir: str, *, verbose: bool = True) -> Mesh:
     """Convert ``cgns_path`` to an OpenFOAM case rooted at ``out_dir``.
 
-    Returns the intermediate :class:`~cgns2foam.topology.Mesh` so that
+    Returns the intermediate :class:`~src.topology.Mesh` so that
     callers (tests, CLI) can introspect the result.
     """
     t0 = time.perf_counter()
