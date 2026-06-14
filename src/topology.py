@@ -33,6 +33,7 @@ from .reader import (
     CGNSElements,
     CGNSZone,
     HEXA_8,
+    MIXED,
     NFACE_n,
     NGON_n,
     PENTA_6,
@@ -40,6 +41,7 @@ from .reader import (
     QUAD_4,
     TETRA_4,
     TRI_3,
+    _ELEM_NVTX,
 )
 
 
@@ -119,7 +121,43 @@ _FIXED_CELL_FACES: dict[int, list[list[int]]] = {
 }
 
 
-def _ngon_from_fixed(elements: list[CGNSElements]) -> tuple[CGNSElements, CGNSElements]:
+_FIXED_CELL_NVTX = {TETRA_4: 4, PYRA_5: 5, PENTA_6: 6, HEXA_8: 8}
+
+
+def _iter_section_cells(sec: CGNSElements):
+    """Yield ``(cell_etype, local_vertex_ids)`` from a cell element section."""
+    n_cell = sec.erange[1] - sec.erange[0] + 1
+    if n_cell <= 0:
+        return
+    conn = sec.connectivity.reshape(-1)
+    if sec.etype == MIXED:
+        pos = 0
+        for _ in range(n_cell):
+            et = int(conn[pos])
+            nvtx = _FIXED_CELL_NVTX.get(et)
+            if nvtx is None:
+                skip_nv = _ELEM_NVTX.get(et)
+                if skip_nv is None or et not in (TRI_3, QUAD_4):
+                    raise NotImplementedError(
+                        f"Unsupported element type {et} inside MIXED section "
+                        f"{sec.name!r}"
+                    )
+                pos += 1 + skip_nv
+                continue
+            yield et, conn[pos + 1:pos + 1 + nvtx]
+            pos += 1 + nvtx
+        return
+
+    if sec.etype not in _FIXED_CELL_FACES:
+        return
+    nvtx = _FIXED_CELL_NVTX[sec.etype]
+    flat = conn.reshape(n_cell, nvtx)
+    for ic in range(n_cell):
+        yield sec.etype, flat[ic]
+
+
+def _ngon_from_fixed(elements: list[CGNSElements],
+                     *, n_cells: int | None = None) -> tuple[CGNSElements, CGNSElements]:
     """Build synthetic NGON / NFACE arrays from fixed-shape cells.
 
     A unique face dictionary is built; identical faces (same sorted
@@ -136,21 +174,24 @@ def _ngon_from_fixed(elements: list[CGNSElements]) -> tuple[CGNSElements, CGNSEl
 
     next_face_id = 1
     total_cells = 0
+    seen_conn: set[bytes] = set()
 
     for sec in sorted(elements, key=lambda e: e.erange[0]):
-        if sec.etype not in _FIXED_CELL_FACES:
-            # Treat 2D fixed shapes (TRI_3, QUAD_4) as faces – emitted
-            # by NGON construction routine elsewhere if needed.  Cell
-            # sections only.
-            continue
-        nvtx = {TETRA_4: 4, PYRA_5: 5, PENTA_6: 6, HEXA_8: 8}[sec.etype]
         n_cell = sec.erange[1] - sec.erange[0] + 1
-        face_specs = _FIXED_CELL_FACES[sec.etype]
-        conn = sec.connectivity.reshape(n_cell, nvtx)
-        for ic in range(n_cell):
+        if n_cell <= 0:
+            continue
+        if n_cells is not None and sec.erange[0] > n_cells:
+            continue
+        conn_key = sec.connectivity.tobytes()
+        if conn_key in seen_conn:
+            continue
+        seen_conn.add(conn_key)
+
+        for etype, verts in _iter_section_cells(sec):
+            face_specs = _FIXED_CELL_FACES[etype]
             cell_signed: list[int] = []
             for fspec in face_specs:
-                fverts = [int(conn[ic, j - 1]) for j in fspec]
+                fverts = [int(verts[j - 1]) for j in fspec]
                 key = tuple(sorted(fverts))
                 fid = face_dict.get(key)
                 if fid is None:
@@ -159,9 +200,8 @@ def _ngon_from_fixed(elements: list[CGNSElements]) -> tuple[CGNSElements, CGNSEl
                     next_face_id += 1
                     face_conn.extend(fverts)
                     face_offsets.append(len(face_conn))
-                    cell_signed.append(fid)               # outward normal
+                    cell_signed.append(fid)
                 else:
-                    # Compare stored ordering – flip sign if reversed
                     start = face_offsets[fid - 1]
                     end = face_offsets[fid]
                     stored = face_conn[start:end]
@@ -206,7 +246,7 @@ def _build_zone_topology(zone: CGNSZone) -> _ZoneTopo:
     ngon, nface = zone.ngon, zone.nface
     if ngon is None or nface is None:
         # Try to build from fixed-shape sections.
-        ngon, nface = _ngon_from_fixed(zone.fixed_elements)
+        ngon, nface = _ngon_from_fixed(zone.fixed_elements, n_cells=zone.n_cells)
 
     face_offsets = ngon.start_offset.astype(np.int64, copy=False)
     face_conn = ngon.connectivity.astype(np.int64, copy=False) - 1  # 0-based vertex ids

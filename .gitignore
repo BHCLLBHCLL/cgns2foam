@@ -7,3 +7,6 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+tests/*
+cases/*

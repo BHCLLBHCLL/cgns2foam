@@ -12,6 +12,7 @@ import os
 import sys
 
 from .convert import convert_file
+from .writer import WriteOptions
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "-q", "--quiet", action="store_true",
         help="Suppress progress messages on stdout.",
     )
+    p.add_argument(
+        "--openfoam-native",
+        "--binary-mesh",
+        action="store_true",
+        dest="openfoam_native",
+        help=(
+            "Write polyMesh as OpenFOAM-native binary "
+            "(location constant/polyMesh, internal-face neighbour only). "
+            "Default output matches ANSA 25.1 OpenFOAM export conventions."
+        ),
+    )
     return p
 
 
@@ -49,7 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     if out_dir is None:
         stem = os.path.splitext(os.path.basename(cgns_path))[0]
         out_dir = os.path.join(os.path.dirname(os.path.abspath(cgns_path)), stem)
-    convert_file(cgns_path, out_dir, verbose=not args.quiet)
+    write_opts = WriteOptions.openfoam_native() if args.openfoam_native else None
+    convert_file(cgns_path, out_dir, verbose=not args.quiet,
+                 write_options=write_opts)
     return 0
 
 

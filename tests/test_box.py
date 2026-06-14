@@ -27,6 +27,7 @@ sys.path.insert(0, str(HERE))
 
 from src.convert import convert_file              # noqa: E402
 from validate import (                            # noqa: E402
+    _skip_header,
     read_boundary,
     read_faces_any,
     read_owner,
@@ -58,6 +59,18 @@ def _stats(case_dir: Path) -> dict:
     }
 
 
+def _ansa_faces_line_layout(faces_path: Path) -> None:
+    """ANSA mode writes ASCII faceList: count, ``(``, then ``n(v...)`` lines."""
+    data = faces_path.read_bytes()
+    assert b"ANSA_VERSION: 25.1.0" in data
+    body_lines = data[_skip_header(data):].split(b"\n")
+    assert body_lines[0].strip().isdigit(), f"expected face count, got {body_lines[0]!r}"
+    assert body_lines[1] == b"(", f"expected '(', got {body_lines[1]!r}"
+    assert b"(" in body_lines[2] and body_lines[2].endswith(b")"), (
+        f"expected n(v0 v1 ...), got {body_lines[2]!r}"
+    )
+
+
 class TestBoxCase(unittest.TestCase):
     def test_convert_matches_reference(self):
         self.assertTrue(CGNS_FILE.is_file(), f"missing input {CGNS_FILE}")
@@ -86,6 +99,33 @@ class TestBoxCase(unittest.TestCase):
                     f"mismatch on {key}: ours={ours[key]} ref={ref[key]}",
                 )
             self.assertEqual(ours["patchNames"], ref["patchNames"])
+
+    def test_faces_ansa_line_layout(self):
+        self.assertTrue(CGNS_FILE.is_file(), f"missing input {CGNS_FILE}")
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td) / "out"
+            convert_file(str(CGNS_FILE), str(out_dir), verbose=False)
+            _ansa_faces_line_layout(out_dir / "constant" / "polyMesh" / "faces")
+
+    def test_case_file_ansa_headers(self):
+        """system/constant/0 use ANSA banner, location \"\" and format binary."""
+        self.assertTrue(CGNS_FILE.is_file(), f"missing input {CGNS_FILE}")
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td) / "out"
+            convert_file(str(CGNS_FILE), str(out_dir), verbose=False)
+            for rel in (
+                "system/controlDict",
+                "system/fvSchemes",
+                "constant/turbulenceProperties",
+                "0/U",
+            ):
+                data = (out_dir / rel).read_bytes()
+                self.assertIn(b"ANSA_VERSION: 25.1.0", data, rel)
+                self.assertIn(b'location "";', data, rel)
+                self.assertIn(b"format binary;", data, rel)
+            ctrl = (out_dir / "system" / "controlDict").read_text(encoding="ascii")
+            self.assertIn("writeCompression\tuncompressed;", ctrl)
+            self.assertIn("application UserSolver;", ctrl)
 
 
 if __name__ == "__main__":  # pragma: no cover

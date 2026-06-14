@@ -38,6 +38,7 @@ TETRA_4 = 10
 PYRA_5 = 12
 PENTA_6 = 14
 HEXA_8 = 17
+MIXED = 20
 
 # Number of vertices per fixed-shape element type.
 _ELEM_NVTX = {
@@ -50,6 +51,32 @@ _ELEM_NVTX = {
     PENTA_6: 6,
     HEXA_8: 8,
 }
+
+
+def _mixed_start_offset(conn: np.ndarray, n_elem: int) -> np.ndarray:
+    """Build ``ElementStartOffset`` for a ``MIXED`` section.
+
+    Each element is stored as ``ElementType, node1, node2, …`` in
+    ``ElementConnectivity`` (CGNS SIDS §8.1.2).
+    """
+    pos = 0
+    offsets = np.empty(n_elem + 1, dtype=np.int64)
+    offsets[0] = 0
+    for i in range(n_elem):
+        et = int(conn[pos])
+        nvtx = _ELEM_NVTX.get(et)
+        if nvtx is None:
+            raise NotImplementedError(
+                f"Unsupported element type {et} inside MIXED section"
+            )
+        pos += 1 + nvtx
+        offsets[i + 1] = pos
+    if pos != conn.size:
+        raise ValueError(
+            f"MIXED connectivity length mismatch: parsed {pos} values, "
+            f"array has {conn.size}"
+        )
+    return offsets
 
 # Subnode name used by SIDS-to-HDF5 to store a node's primary data array.
 _DATA = " data"
@@ -174,6 +201,11 @@ def _read_elements(node: h5py.Group) -> CGNSElements:
     if "ElementStartOffset" in node:
         # NGON_n / NFACE_n (and MIXED) use explicit offsets.
         so = _data(node["ElementStartOffset"])
+    elif int(etype) == MIXED:
+        if n_elem <= 0:
+            so = np.zeros(1, dtype=np.int64)
+        else:
+            so = _mixed_start_offset(np.ascontiguousarray(conn).reshape(-1), n_elem)
     else:
         # Fixed-shape element type: synthesise the offset array.
         nvtx = _ELEM_NVTX.get(int(etype))

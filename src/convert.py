@@ -7,10 +7,11 @@ import time
 
 from .reader import read_cgns
 from .topology import Mesh, build_mesh
-from .writer import write_case
+from .writer import WriteOptions, write_case
 
 
-def convert_file(cgns_path: str, out_dir: str, *, verbose: bool = True) -> Mesh:
+def convert_file(cgns_path: str, out_dir: str, *, verbose: bool = True,
+                 write_options: WriteOptions | None = None) -> Mesh:
     """Convert ``cgns_path`` to an OpenFOAM case rooted at ``out_dir``.
 
     Returns the intermediate :class:`~src.topology.Mesh` so that
@@ -40,7 +41,8 @@ def convert_file(cgns_path: str, out_dir: str, *, verbose: bool = True) -> Mesh:
               f"[{t1 - t0:.2f}s read + {time.perf_counter() - t1:.2f}s build]")
 
     t2 = time.perf_counter()
-    write_case(out_dir, mesh, source_path=os.path.abspath(cgns_path))
+    write_case(out_dir, mesh, source_path=os.path.abspath(cgns_path),
+               options=write_options)
     if verbose:
         print(f"[cgns2foam] case written to {out_dir} "
               f"[{time.perf_counter() - t2:.2f}s]")

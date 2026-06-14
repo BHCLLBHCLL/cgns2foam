@@ -55,12 +55,45 @@ def _skip_header(data: bytes) -> int:
     return idx
 
 
+def _file_format(data: bytes) -> str:
+    m = re.search(rb"format\s+(\w+)\s*;", data)
+    return m.group(1).decode("ascii") if m else "binary"
+
+
+def _read_ascii_int_list(data: bytes, start: int) -> tuple[np.ndarray, int]:
+    """Parse ``<N>\\n(\\n ... \\n)`` label/scalar list from *start*."""
+    paren = data.find(b"(", start)
+    if paren < 0:
+        raise ValueError("malformed OpenFOAM list: missing '('")
+    n = int(data[start:paren].strip())
+    depth = 1
+    pos = paren + 1
+    while pos < len(data) and depth:
+        if data[pos:pos + 1] == b"(":
+            depth += 1
+        elif data[pos:pos + 1] == b")":
+            depth -= 1
+        pos += 1
+    chunk = data[paren + 1:pos - 1]
+    tokens = chunk.split()
+    if len(tokens) < n:
+        raise ValueError(f"expected {n} list entries, got {len(tokens)}")
+    arr = np.asarray([int(t) for t in tokens[:n]], dtype=np.int64)
+    return arr, pos
+
+
 def _read_binary_label_list(data: bytes, start: int) -> tuple[np.ndarray, int]:
     """Parse ``<N>\\n(<N×int32>)`` from *start*. Returns (array, new_idx)."""
     paren = data.find(b"(", start)
     n = int(data[start:paren].strip())
     arr = np.frombuffer(data[paren + 1:paren + 1 + 4 * n], dtype="<i4")
     return arr.copy(), paren + 1 + 4 * n + 1   # skip closing ')'
+
+
+def _read_label_list(data: bytes, start: int) -> tuple[np.ndarray, int]:
+    if _file_format(data) == "ascii":
+        return _read_ascii_int_list(data, start)
+    return _read_binary_label_list(data, start)
 
 
 def _read_binary_scalar_list(data: bytes, start: int) -> tuple[np.ndarray, int]:
@@ -73,6 +106,23 @@ def _read_binary_scalar_list(data: bytes, start: int) -> tuple[np.ndarray, int]:
 def read_points(path: str) -> np.ndarray:
     data = _read_file(path)
     idx = _skip_header(data)
+    if _file_format(data) == "ascii":
+        paren = data.find(b"(", idx)
+        n = int(data[idx:paren].strip())
+        close = data.rfind(b")")
+        chunk = data[paren + 1:close]
+        rows = []
+        for line in chunk.splitlines():
+            line = line.strip()
+            if not line or line == b")":
+                continue
+            if line.startswith(b"(") and line.endswith(b")"):
+                parts = line[1:-1].split()
+                rows.append([float(p) for p in parts])
+        arr = np.asarray(rows, dtype=np.float64)
+        if arr.shape[0] != n:
+            raise ValueError(f"points: expected {n} vectors, got {arr.shape[0]}")
+        return arr
     paren = data.find(b"(", idx)
     n = int(data[idx:paren].strip())
     arr = np.frombuffer(data[paren + 1:paren + 1 + 8 * 3 * n], dtype="<f8")
@@ -82,8 +132,8 @@ def read_points(path: str) -> np.ndarray:
 def read_owner(path: str) -> np.ndarray:
     data = _read_file(path)
     idx = _skip_header(data)
-    arr, _ = _read_binary_label_list(data, idx)
-    return arr
+    arr, _ = _read_label_list(data, idx)
+    return arr.astype(np.int64, copy=False)
 
 
 def read_neighbour(path: str) -> np.ndarray:
@@ -99,6 +149,10 @@ def read_faces_compact(path: str) -> tuple[np.ndarray, np.ndarray]:
     """
     data = _read_file(path)
     idx = _skip_header(data)
+    if _file_format(data) == "ascii":
+        ofs, pos = _read_ascii_int_list(data, idx)
+        conn, _ = _read_ascii_int_list(data, pos)
+        return ofs.astype(np.int64), conn.astype(np.int64)
     paren1 = data.find(b"(", idx)
     n_ofs = int(data[idx:paren1].strip())
     ofs = np.frombuffer(data[paren1 + 1:paren1 + 1 + 4 * n_ofs], dtype="<i4").copy()
@@ -136,10 +190,38 @@ def read_faces_classic(path: str) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(offsets, dtype=np.int64), np.asarray(conn, dtype=np.int64)
 
 
+def read_faces_ascii_matrix(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Read ASCII ``faceList`` matrix form ``n(k(v0 v1 ...))`` per line."""
+    data = _read_file(path)
+    idx = _skip_header(data)
+    body = data[idx:].decode("ascii", errors="replace")
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    m = re.search(r"(\d+)\s*\(", body)
+    if not m:
+        raise ValueError("malformed ASCII faceList: missing face count")
+    n_faces = int(m.group(1))
+    chunk = body[m.end():body.rfind(")")]
+    conn: list[int] = []
+    offsets = [0]
+    for fm in re.finditer(r"(\d+)\(([^)]*)\)", chunk):
+        verts = [int(x) for x in fm.group(2).split()]
+        if len(verts) != int(fm.group(1)):
+            raise ValueError("faceList vertex count mismatch")
+        conn.extend(verts)
+        offsets.append(len(conn))
+    if len(offsets) - 1 != n_faces:
+        raise ValueError(
+            f"faceList: header says {n_faces} faces, parsed {len(offsets) - 1}"
+        )
+    return np.asarray(offsets, dtype=np.int64), np.asarray(conn, dtype=np.int64)
+
+
 def read_faces_any(path: str) -> tuple[np.ndarray, np.ndarray]:
     """Auto-detect the faces file flavour and return (offsets, conn)."""
     data = _read_file(path)
     cls = re.search(rb"class\s+(\w+)\s*;", data)
+    if cls and cls.group(1) == b"faceList" and _file_format(data) == "ascii":
+        return read_faces_ascii_matrix(path)
     if cls and cls.group(1) in (b"faceCompactList", b"faceCompactIOList"):
         return read_faces_compact(path)
     # ANSA also writes a compact format under ``faceList``. Heuristic:

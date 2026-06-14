@@ -13,6 +13,7 @@ Public entry point: :func:`src.convert.convert_file`.
 
 from .convert import convert_file  # noqa: F401
 from .reader import read_cgns      # noqa: F401
+from .writer import WriteOptions   # noqa: F401
 
-__all__ = ["convert_file", "read_cgns"]
+__all__ = ["convert_file", "read_cgns", "WriteOptions"]
 __version__ = "0.1.0"

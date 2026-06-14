@@ -5,8 +5,10 @@
 
 > 仅依赖 `h5py` 与 `numpy`。  
 > **目标 OpenFOAM 版本：openfoam.com 的 v2412**（ESI/OpenCFD 发行版）。
-> 输出按 OpenFOAM 默认编译参数（32 位 label、双精度）的二进制格式生成，
-> 并与 v2412 自带的 `checkMesh` 工具完全对接（已验证）。
+> 默认以 **binary polyMesh + ANSA 25.1 兼容头** 写出（`location ""`、
+> `neighbour` 全长且边界面为 `-1`、ANSA 风格 `note` 与 banner 间距）。
+> OpenFOAM v2412 与 ANSA 25.1 均可读取。若只需 OpenFOAM 原生布局，
+> 使用 ``--openfoam-native``。
 
 ## 目录结构
 
@@ -51,6 +53,9 @@ python3 -m src path/to/case.cgns /tmp/myCase
 
 # 安静模式（脚本场景）
 python3 -m src -q path/to/case.cgns /tmp/myCase
+
+# OpenFOAM 原生 polyMesh（非 ANSA 回导场景）
+python3 -m src --openfoam-native path/to/case.cgns /tmp/myCase
 ```
 
 生成的目录结构为标准 OpenFOAM 工程（v2412 期望布局）：
@@ -60,17 +65,17 @@ myCase/
 ├── 0/                          # 初始条件（U、p、p_rgh）
 ├── constant/
 │   ├── polyMesh/
-│   │   ├── points              # 二进制 vectorField
-│   │   ├── faces               # 二进制 faceCompactList
-│   │   ├── owner               # 二进制 labelList
-│   │   ├── neighbour           # 二进制 labelList（长度 = nInternalFaces）
-│   │   ├── boundary            # ASCII patch 字典
+│   │   ├── points              # binary vectorField（默认，ANSA 可回导）
+│   │   ├── faces               # ASCII faceList（ANSA 可解析；其余 mesh 为 binary）
+│   │   ├── owner               # binary labelList
+│   │   ├── neighbour           # binary labelList（长度 = nFaces，边界面 -1）
+│   │   ├── boundary            # patch 字典（头 format binary，体 ASCII）
 │   │   ├── cellZones           # 每个 CGNS Zone 对应一个 cellZone
 │   │   │                       # （class regIOobject，v2412 期望的命名）
 │   │   └── faceZones           # 空（与 ANSA 输出保持一致）
-│   └── turbulenceProperties
+│   └── turbulenceProperties    # ANSA 头：location ""、format binary
 └── system/
-    ├── controlDict
+    ├── controlDict             # ANSA 头；writeCompression uncompressed
     ├── fvSchemes               # 最小化占位，v2412 启动时强制要求
     └── fvSolution              # 最小化占位
 ```
@@ -79,10 +84,16 @@ myCase/
 
 ```python
 # 仓库根目录加入 sys.path 后即可：
-from src import convert_file
+from src import convert_file, WriteOptions
 
 mesh = convert_file("case.cgns", "out_dir", verbose=True)
 print(mesh.n_cells, mesh.owner.size, len(mesh.patches))
+
+# OpenFOAM 原生 binary 输出
+mesh = convert_file(
+    "case.cgns", "out_dir",
+    write_options=WriteOptions.openfoam_native(),
+)
 ```
 
 ## 端到端测试
