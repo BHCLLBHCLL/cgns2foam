@@ -66,7 +66,7 @@ myCase/
 ├── constant/
 │   ├── polyMesh/
 │   │   ├── points              # binary vectorField（默认，ANSA 可回导）
-│   │   ├── faces               # ASCII faceList（ANSA 可解析；其余 mesh 为 binary）
+│   │   ├── faces               # binary faceCompactList
 │   │   ├── owner               # binary labelList
 │   │   ├── neighbour           # binary labelList（长度 = nFaces，边界面 -1）
 │   │   ├── boundary            # patch 字典（头 format binary，体 ASCII）
