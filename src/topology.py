@@ -387,12 +387,148 @@ def _bc_type_to_foam(bc_type: str) -> str:
     return "patch"
 
 
-def build_mesh(case: CGNSCase, *, default_exterior_name: str = "default_exterior") -> Mesh:
+def _face_coord_key(
+    points: np.ndarray,
+    face_offsets: np.ndarray,
+    face_vertices: np.ndarray,
+    fi: int,
+    tol: float,
+) -> tuple[tuple[int, ...], ...]:
+    """Sorted, tolerance-quantised vertex coordinates for face *fi*."""
+    s = int(face_offsets[fi])
+    e = int(face_offsets[fi + 1])
+    verts = points[face_vertices[s:e]]
+    inv = np.round(verts / tol).astype(np.int64)
+    return tuple(sorted(map(tuple, inv)))
+
+
+def _zone_is_solid(zone_name: str) -> bool:
+    """Heuristic: CGNS zone names for solid components in laptop cases."""
+    n = zone_name.lower()
+    return "solid_region" in n or n.startswith("solid.")
+
+
+def _trim_partner_priority(
+    entry_zone: str,
+    other_zone: str,
+    inter_size: int,
+    other_size: int,
+) -> tuple[int, int, int]:
+    """Rank overlap partners; higher tuple wins.
+
+    Solid-zone BC lists are often over-counted across several solid–solid
+    junctions that share a name (e.g. ``CU_s`` on Cu_block vs Cover).
+    Prefer trimming against a **non-solid** partner (air / fan / rotor)
+    so the fluid–solid interface (925 faces for air–Cu) is kept and
+    does not spill into ``default_exterior``.
+    """
+    entry_solid = _zone_is_solid(entry_zone)
+    other_solid = _zone_is_solid(other_zone)
+    if entry_solid and not other_solid:
+        tier = 2
+    else:
+        tier = 1
+    full_subset = 1 if inter_size == other_size else 0
+    return (tier, full_subset, inter_size)
+
+
+def _trim_cross_zone_bc_overlaps(
+    zones: list[CGNSZone],
+    zone_topos: list[_ZoneTopo],
+    *,
+    point_tol: float = 1e-4,
+) -> dict[str, list[dict]]:
+    """Trim over-counted same-named BC face lists across zones.
+
+    For each sanitised BC name that appears in two or more zones, compare
+    geometric face sets.  When a zone's BC partially overlaps another
+    zone's same-named BC and this zone has **more** faces, keep only the
+    intersection with the partner that yields the largest overlap (the
+    most likely true interface).  When two same-named BCs do not share
+    any face geometry, neither is modified.
+    """
+    groups: dict[str, list[dict]] = {}
+
+    for zi, (zone, zt) in enumerate(zip(zones, zone_topos)):
+        pts = zone.coords
+        for bc in zone.bcs:
+            if bc.grid_location != "FaceCenter":
+                continue
+            if bc.name not in zt.bc_face_lists:
+                continue
+            ids = zt.bc_face_lists[bc.name]
+            if ids.size == 0:
+                continue
+            base = _sanitize_patch_name(bc.name)
+            key_to_fi: dict[tuple[tuple[int, ...], ...], int] = {}
+            for fi in ids:
+                key = _face_coord_key(pts, zt.face_offsets, zt.face_vertices, int(fi), point_tol)
+                key_to_fi[key] = int(fi)
+            groups.setdefault(base, []).append(
+                {
+                    "zi": zi,
+                    "bc_name": bc.name,
+                    "n_before": int(ids.size),
+                    "key_to_fi": key_to_fi,
+                    "keys": set(key_to_fi),
+                }
+            )
+
+    report: dict[str, list[dict]] = {}
+    for base, entries in groups.items():
+        if len({e["zi"] for e in entries}) < 2:
+            continue
+        changed: list[dict] = []
+        for entry in entries:
+            keys = set(entry["keys"])
+            entry_zone = zones[entry["zi"]].name
+            best_inter: set[tuple[tuple[int, ...], ...]] | None = None
+            best_rank: tuple[int, int, int] | None = None
+            for other in entries:
+                if other["zi"] == entry["zi"]:
+                    continue
+                inter = keys & other["keys"]
+                if not inter:
+                    continue
+                if len(keys) > len(other["keys"]) and len(inter) < len(keys):
+                    rank = _trim_partner_priority(
+                        entry_zone,
+                        zones[other["zi"]].name,
+                        len(inter),
+                        len(other["keys"]),
+                    )
+                    if best_rank is None or rank > best_rank:
+                        best_rank = rank
+                        best_inter = inter
+            if best_inter is None:
+                continue
+            new_ids = np.asarray(
+                sorted(entry["key_to_fi"][k] for k in best_inter),
+                dtype=np.int64,
+            )
+            zt = zone_topos[entry["zi"]]
+            zt.bc_face_lists[entry["bc_name"]] = new_ids
+            changed.append(
+                {
+                    "zone": zones[entry["zi"]].name,
+                    "bc": entry["bc_name"],
+                    "before": entry["n_before"],
+                    "after": int(new_ids.size),
+                }
+            )
+        if changed:
+            report[base] = changed
+    return report
+
+
+def build_mesh(case: CGNSCase, *, default_exterior_name: str = "default_exterior",
+               bc_overlap_tol: float = 1e-4) -> Mesh:
     """Convert a :class:`CGNSCase` into an OpenFOAM-ready :class:`Mesh`."""
     if not case.zones:
         raise ValueError("CGNS case contains no zones")
 
     zone_topos = [_build_zone_topology(z) for z in case.zones]
+    _trim_cross_zone_bc_overlaps(case.zones, zone_topos, point_tol=bc_overlap_tol)
 
     # ------------------------------------------------------------------
     # Concatenate zones (no interface stitching).

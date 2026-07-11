@@ -5,11 +5,9 @@ Generates a complete OpenFOAM project directory (``constant/polyMesh/*``,
 ``0/`` directory).
 
 By default, polyMesh geometry files use **binary** with ANSA 25.1-style
-headers.  The ``faces`` file is written as ASCII ``faceList`` (one face
-per line) because ANSA's importer reads that file line-by-line and chokes
-on embedded ``0x0A`` bytes inside binary ``faceCompactList`` payloads
-(error ``line 26 0``).  ``points``, ``owner``, ``neighbour`` and
-``cellZones`` stay binary.
+headers (``location ""``, full-length ``neighbour`` with ``-1`` on boundary
+faces, ANSA ``note`` strings, extra banner spacing).  ``faces`` uses binary
+``faceCompactList`` like ``points``, ``owner`` and ``neighbour``.
 
 Use :class:`WriteOptions` (or CLI ``--openfoam-native``) for the legacy
 OpenFOAM-native layout (``location "constant/polyMesh"``, internal-face
@@ -230,34 +228,6 @@ def _write_ascii_compact_label_list(fh, offsets: np.ndarray,
     fh.write(b")\n")
 
 
-def _write_ascii_face_list(fh, mesh: Mesh) -> None:
-    """Write OpenFOAM ``faceList`` ASCII matrix form (ANSA-safe).
-
-    Layout::
-
-        nFaces
-        (
-        4(0 1 2 3)
-        3(0 1 2)
-        ...
-        )
-    """
-    n_faces = mesh.owner.size
-    fh.write(f"{n_faces}\n(\n".encode("ascii"))
-    for fi in range(n_faces):
-        s = int(mesh.face_offsets[fi])
-        e = int(mesh.face_offsets[fi + 1])
-        verts = mesh.face_vertices[s:e]
-        fh.write(
-            (
-                f"{verts.size}("
-                + " ".join(str(int(v)) for v in verts)
-                + ")\n"
-            ).encode("ascii")
-        )
-    fh.write(b")\n")
-
-
 def _neighbour_values(mesh: Mesh, options: WriteOptions) -> np.ndarray:
     if options.full_neighbour:
         full = np.full(mesh.owner.size, -1, dtype=np.int32)
@@ -358,21 +328,11 @@ def _write_points(path: str, mesh: Mesh, source: str,
 
 def _write_faces(path: str, mesh: Mesh, source: str,
                  options: WriteOptions) -> None:
-    # ANSA 25.1 reads ``faces`` line-by-line; binary faceCompactList hits
-    # embedded 0x0A in int32 payloads (``line 26 0``).  ASCII faceList works.
-    if options.ansa_headers:
-        with open(path, "wb") as fh:
-            fh.write(_full_header(source, "faceList", "faces",
-                                  fmt="ascii", location=options.mesh_location,
-                                  ansa_spacing=True))
-            _write_ascii_face_list(fh, mesh)
-        return
-
     fmt = _mesh_fmt(options)
     with open(path, "wb") as fh:
         fh.write(_full_header(source, "faceCompactList", "faces",
                               fmt=fmt, location=options.mesh_location,
-                              ansa_spacing=False))
+                              ansa_spacing=options.ansa_headers))
         if fmt == "ascii":
             _write_ascii_compact_label_list(fh, mesh.face_offsets, mesh.face_vertices)
         else:

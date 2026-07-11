@@ -19,20 +19,6 @@
 我们的 writer 完全按 v2412 的期望产出。如果以后需要兼容 Foundation
 版本，把上述 3 处头部 / 关键字改一改即可。
 
-**目标 OpenFOAM 发行版**：openfoam.com 的 **v2412**（ESI/OpenCFD）。
-我们没有对 openfoam.org 的 Foundation 版本（11/12/13 等）做兼容；
-两者在以下几个地方有不同的 polyMesh I/O 期望（详见 §2 / §4）：
-
-| 文件 / 配置项                       | openfoam.com v2412               | openfoam.org 13                  |
-|-------------------------------------|----------------------------------|----------------------------------|
-| `cellZones` 的 `class` 头           | `regIOobject`                    | `cellZoneList`                   |
-| `faceZones` 的 `class` 头           | `regIOobject`                    | `faceZoneList`                   |
-| `controlDict` 的 `writeCompression` | `on`/`off`                       | `compressed`/`uncompressed`      |
-| `system/fvSchemes`/`fvSolution`     | **必需**（即使只跑 `checkMesh`） | 启动 `checkMesh` 时可以缺失      |
-
-我们的 writer 完全按 v2412 的期望产出。如果以后需要兼容 Foundation
-版本，把上述 3 处头部 / 关键字改一改即可。
-
 ---
 
 ## 1. CGNS（HDF5）数据模型简述
@@ -72,9 +58,10 @@ CGNS 的 HDF5 编码遵循 CPEX 0001（SIDS-to-HDF5 mapping）。其核心规则
 - **NFACE_n** 段：列出 *单元*，每个单元由若干面构成；连接性中的整数是
   **带符号** 的面 id，正号表示该面外法线指向单元外部，负号表示指向内部。
 
-固定形状的单元段（`TETRA_4`、`PYRA_5`、`PENTA_6`、`HEXA_8`）也能被
-读取并按 CGNS SIDS §11.2 的局部面定义自动展开成等价的 NGON/NFACE，详见
-`src/topology.py::_ngon_from_fixed`。
+固定形状的单元段（`TETRA_4`、`PYRA_5`、`PENTA_6`、`HEXA_8`）以及
+`MIXED`（etype 20，段内逐单元带类型前缀）也能被读取，并按 CGNS SIDS §11.2
+的局部面定义自动展开成等价的 NGON/NFACE，详见
+`src/topology.py::_ngon_from_fixed` 与 `_iter_section_cells`。
 
 ---
 
@@ -94,16 +81,51 @@ points        :  <header>\n N \n ( <N*3*8 bytes float64> ) \n
 faces*        :  <header>\n (N+1) \n ( <(N+1)*4 bytes int32 offsets> )
                  <S> \n ( <S*4 bytes int32 connectivity> ) \n
 owner         :  <header>\n N \n ( <N*4 bytes int32> ) \n
-neighbour     :  <header>\n M \n ( <M*4 bytes int32> ) \n     (M = nInternalFaces)
+neighbour     :  <header>\n M \n ( <M*4 bytes int32> ) \n
+                 (默认 M = nFaces，边界面填 -1；见 §2.1)
 ```
 
-`*` 处 `faces` 文件用的是 OpenFOAM 的 *CompactList<labelList>* 格式：
-先写 `nFaces+1` 个 offsets，再写所有面顶点的扁平连接性。这与 ANSA 的输出格式
-一致；OpenFOAM 自身的标准 `faceList` 也兼容此布局，由文件头 `class faceCompactList`
-表明。
+`*` 处 `faces` 文件用的是 OpenFOAM 的 *CompactList<labelList>* 格式（
+`class faceCompactList`）：先写 `nFaces+1` 个 offsets，再写所有面顶点的
+扁平连接性。默认以 **binary** 写出，与 ANSA / OpenFOAM v2412 一致。
 
-`boundary` 文件是 ASCII 字典；`cellZones` 是 ASCII 字典外加每个 zone 内嵌的
-二进制 `List<label>`（同样是 `N\n(<N*4 bytes int32>)\n`）。
+`boundary` 文件头为 `format binary`、体为 ASCII 字典；`cellZones` 是
+ASCII 字典外加每个 zone 内嵌的二进制 `List<label>`（同样是
+`N\n(<N*4 bytes int32>)\n`）。
+
+### 2.1 默认写出格式（`WriteOptions` / ANSA 25.1）
+
+CLI 默认（不加 `--openfoam-native`）等价于 `WriteOptions()`，主要行为：
+
+| 项目 | 默认值 | 说明 |
+|------|--------|------|
+| `mesh_format` | `binary` | `points` / `faces` / `owner` / `neighbour` / `cellZones` 内嵌列表 |
+| `mesh_location` | `""` | polyMesh 文件 FoamFile `location`（ANSA 为空字符串） |
+| `full_neighbour` | `True` | `neighbour` 长度 = `nFaces`，边界面为 `-1` |
+| `ansa_headers` | `True` | 86 列 banner，含 `ANSA_VERSION: 25.1.0` 与 `Output from:` |
+
+**polyMesh 头部细节**（`ansa_headers=True` 时）：
+
+- `owner` / `neighbour` 的 `note` 使用 ANSA 风格：
+  `nCells:… nActiveFaces:… nActivePoints:…`
+- `boundary` patch 字段顺序为 `startFace` → `nFaces`
+- `faces` 为 binary `faceCompactList`（不再使用 ASCII `faceList` 矩阵行）
+
+**非 polyMesh 文件**（`system/`、`constant/turbulenceProperties`、`0/`）在
+`ansa_headers=True` 时同样使用 ANSA banner，`FoamFile` 中
+`location ""`、`format binary`（体仍为 ASCII 字典/场），`controlDict` 的
+`writeCompression` 写 `uncompressed`（对齐 ANSA v2412 导出）。
+
+使用 OpenFOAM 原生布局时：
+
+```python
+from src import convert_file, WriteOptions
+convert_file("in.cgns", "out", write_options=WriteOptions.openfoam_native())
+# 或 CLI: python -m src --openfoam-native in.cgns out
+```
+
+`openfoam_native()` 设置 `mesh_location="constant/polyMesh"`、
+`full_neighbour=False`（仅内部面）、`ansa_headers=False`（cgns2foam 短 banner）。
 
 ---
 
@@ -150,6 +172,9 @@ cgns2foam 采用 **不做几何 stitching** 的合并策略：
 - 若同名 BC 在多个 zone 中出现，依次给后出现者加 `_1`、`_2` 后缀以避免
   patch 名冲突；这与 ANSA 在 `laptop_simplified` 中给 `impeller_1` /
   `impeller_2` 改名为 `impeller_11` / `impeller_21` 的做法等价。
+- **跨 zone 同名 BC 重叠裁剪**（`build_mesh` 调用
+  `_trim_cross_zone_bc_overlaps`，详见 §3.5）：修正 CGNS 中个别 BC 多标
+  面片的问题。
 - 同一 zone 内若同一面被多个 BC 引用（ANSA 在旋转机械里常这样标），
   按 BC 出现顺序 **先到先得**，避免一张面被分到两个 patch。
 - 任何没被 BC 覆盖的边界面归入 `default_exterior` patch（类型 `wall`），
@@ -183,6 +208,51 @@ OpenFOAM 要求：
 
 映射逻辑在 `src/topology.py::_bc_type_to_foam`，可按需扩展。
 
+### 3.5 跨 zone 同名 BC 重叠裁剪
+
+实现：`src/topology.py::_trim_cross_zone_bc_overlaps`（在 `build_mesh` 拼接
+zone 之前就地修改各 zone 的 `bc_face_lists`）。
+
+**背景**：ANSA / Cradle 导出的多区域 CGNS 中，固体 zone 常把多个物理交界
+（流体–固体、固体–固体）的面片都标在同一个 BC 名上（如 `CU_s`）。若直接
+按 CGNS 列表写出，面数会远大于真实接口；未裁剪部分在 patch 先到先得分配
+后会落入 `default_exterior`。
+
+**算法概要**：
+
+1. 按 `_sanitize_patch_name(bc.name)` 分组，仅处理出现在 **≥2 个 zone** 的
+   BC 名。
+2. 对每个 BC 面片，用顶点坐标量化键（`point_tol`，默认 `1e-4`）建立几何
+   等价类（跨 zone 坐标相同即视为同一物理面）。
+3. 对组内每个 entry `E`，遍历其它 zone 的伙伴 `O`：
+   - 若 `E ∩ O` 为空 → 与该伙伴无重叠，跳过。
+   - 若 `|E| > |O|` 且 `|E ∩ O| < |E|` → `E` 为较大方，候选裁剪为
+     `E ∩ O`。
+4. **伙伴优先级**（`_trim_partner_priority`）：
+   - 当 `E` 所在 zone 为固体（名称含 `solid_region`）且 `O` 为非固体时，
+     优先选流体伙伴（air / fan / rotor 等）。
+   - 同优先级下，优先「小方被完全包含」的交集（`|inter| == |O|`），再比
+     `|inter|` 大小。
+5. 选中最佳伙伴后，将 `E` 的面列表替换为交集；**完全不重叠**的 entry 不
+   修改。
+
+**典型案例**（`laptop_thermal_steady_scaled_v3_orig_fix.cgns`）：
+
+| BC | zone | 裁剪前 | 裁剪后 | 说明 |
+|----|------|--------|--------|------|
+| `CU_s` | `solid_region.Cu_block` | 26031 | **925** | 应与 `air.air_domain` 的 `CU_s` 对齐，而非与 `Cover` 的 12804 |
+| `CU_s` | `air.air_domain` | 925 | 925 | 较小方，不裁剪 |
+| `case1_s` | `fan1.case1` | 239472 | 224166 | 与 `air` 侧 `case1_s` 对齐 |
+| `Cover_s` | `solid_region.Cover` | 96548 | 54391 | 与 `air` 侧 `Cover_s` 对齐 |
+
+裁剪后 `Cu_block` 上 `CU_s_4` 为 925 面，`default_exterior` 为 0（修复前
+误裁为 12804 时，925 个流体–固体交界面会掉进 `default_exterior`）。
+
+单元测试：`tests/test_bc_overlap.py`（部分重叠裁剪、无重叠不裁剪、固体优先
+流体伙伴）。
+
+可调参数：`build_mesh(..., bc_overlap_tol=1e-4)`。
+
 ---
 
 ## 4. 生成的 OpenFOAM 文件汇总
@@ -192,16 +262,15 @@ OpenFOAM 要求：
 | `constant/polyMesh/points`            | 顶点坐标（二进制 vectorField）                    |
 | `constant/polyMesh/faces`             | 面顶点列表（二进制 faceCompactList）              |
 | `constant/polyMesh/owner`             | 每个面所属 owner cell id（二进制 labelList）       |
-| `constant/polyMesh/neighbour`         | 每个内部面的 neighbour cell id（二进制 labelList）|
-| `constant/polyMesh/boundary`          | patch 字典（ASCII）                                |
+| `constant/polyMesh/neighbour`         | 每个面的 neighbour（默认全长 `nFaces`，边界面 `-1`；二进制 labelList）|
+| `constant/polyMesh/boundary`          | patch 字典（头 `format binary`，体 ASCII；`startFace` 在 `nFaces` 前） |
 | `constant/polyMesh/cellZones`         | 每个 CGNS zone 对应一个 cellZone（ASCII + 内嵌二进制 label list，`class regIOobject`）|
 | `constant/polyMesh/faceZones`         | 空（`class regIOobject`，与 ANSA 输出保持一致）   |
-| `constant/turbulenceProperties`       | `simulationType RAS;` 默认 `laminar`              |
-| `system/controlDict`                  | `application UserSolver;` 占位、`writeCompression off;`（用户改成实际求解器）|
-| `system/fvSchemes`                    | 最小占位（v2412 启动时必需）                       |
-| `system/fvSolution`                   | 最小占位（v2412 启动时必需）                       |
-| `0/U`                                 | 体积矢量场，默认 `(0 0 0)`、墙面 `fixedValue`     |
-| `0/p`, `0/p_rgh`                      | 体积标量场，默认 `0`、墙面 `zeroGradient`         |
+| `constant/turbulenceProperties`       | `simulationType RAS;` 默认 `laminar`；ANSA 头 `location ""` |
+| `system/controlDict`                  | `application UserSolver;` 占位；ANSA 头 + `writeCompression uncompressed` |
+| `system/fvSchemes`                    | 最小占位（v2412 启动时必需）；ANSA 头           |
+| `system/fvSolution`                   | 最小占位（v2412 启动时必需）；ANSA 头           |
+| `0/U`, `0/p`, `0/p_rgh`               | 最小初值；ANSA 头 `location ""`、`format binary` |
 
 初始条件主要起“撑起 case 骨架”的作用，便于用户随后用编辑器或脚本
 （如 `setFields`）覆盖实际场值。
@@ -239,6 +308,11 @@ OpenFOAM 要求：
   使用 `_1` / `_2` 后缀做名字去重。
 - ANSA 会把附在 `PSHELL` 卡上的面单独抽成 `Default_PSHELL_Property`
   patch；本转换器把它们一并归入 `default_exterior`。
+- 默认 ANSA 兼容写出（§2.1）与 ANSA 25.1 回导格式对齐；`faces` 为 binary
+  `faceCompactList`（非 ASCII 逐行 `faceList`）。
+- 多区域笔记本类算例（如 `laptop_thermal_steady_scaled_v3`）依赖 §3.5 的
+  BC 裁剪，否则固体 zone 的接口 patch 面数偏大、`default_exterior` 会
+  承接本属于命名 BC 的面片。
 
 如需匹配 ANSA 的命名风格，可在 `topology.py` 里扩展自定义 BC → patch
 名映射。
@@ -260,21 +334,28 @@ OpenFOAM 要求：
    `int32` 改为 `int64`。
 6. **仅针对 openfoam.com v2412**：openfoam.org 11/12/13 等 Foundation
    版本对 `cellZones` / `faceZones` 头部、`writeCompression` 关键字、
-   以及是否需要 `fvSchemes`/`fvSolution` 期望不同；如需兼容请按 §0
+   以及是否需要 `fvSchemes`/`fvSolution` 期望不同；如需兼容请按文首
    的对照表调整 `writer.py` 中的相应字段。
+7. **CGNS BC 多标 / 过标**：源文件中固体 zone 可能把多个物理交界标在同一
+   BC 名下；转换器用 §3.5 启发式裁剪，固体/流体伙伴判定依赖 zone 命名
+   （`solid_region.*`）。特殊命名需扩展 `_zone_is_solid` 或优先级规则。
 
 ---
 
 ## 7. 扩展点速查
 
 - **加新的 BC 类型映射**：编辑 `src/topology.py::_bc_type_to_foam`。
-- **改 patch 命名/合并策略**：编辑 `src/topology.py::build_mesh` 内的
-  去重 / 默认 patch 段。
+- **改 patch 命名 / 合并 / BC 裁剪策略**：编辑 `src/topology.py::build_mesh`
+  与 `_trim_cross_zone_bc_overlaps`、`_trim_partner_priority`、`_zone_is_solid`。
+- **改写出格式（ANSA / OpenFOAM 原生）**：编辑 `src/writer.py::WriteOptions`
+  及各 `_write_*` 例程；CLI 开关 `--openfoam-native`。
 - **写入流场初值**：在 `src/writer.py` 里仿照 `_write_initial_field`
   实现 `nonuniform List<scalar>` 二进制写入，并在 `src/convert.py` 串
   起来。
 - **支持固定形状元素的二维（面）段**：扩展
   `src/topology.py::_FIXED_CELL_FACES` 以及 `_ngon_from_fixed`。
+- **支持更多 MIXED 段内单元类型**：扩展 `src/topology.py::_FIXED_CELL_FACES`
+  与 `src/reader.py::_ELEM_NVTX`。
 
 ---
 
@@ -283,15 +364,25 @@ OpenFOAM 要求：
 ```bash
 # 在仓库根目录下运行，确保 `src` 包能被 import
 python3 -m src <in.cgns> [out_dir] [-q|--quiet]
+python3 -m src --openfoam-native <in.cgns> [out_dir]   # 非 ANSA 头
 python3 tests/run_all.py [--with-checkmesh] [--out-root /tmp/out]
-python3 -m unittest tests.test_box -v
+python3 -m unittest tests.test_box tests.test_bc_overlap -v
 ```
 
 ```python
-from src import read_cgns, convert_file
+from src import read_cgns, convert_file, WriteOptions
+
 case = read_cgns("in.cgns")          # 仅读取，得到 CGNSCase
-mesh = convert_file("in.cgns", "out")
+mesh = convert_file("in.cgns", "out")  # 默认 WriteOptions()，含 BC 裁剪
+mesh = convert_file(
+    "in.cgns", "out",
+    write_options=WriteOptions.openfoam_native(),
+)
 # mesh.points / mesh.face_offsets / mesh.face_vertices /
 # mesh.owner / mesh.neighbour / mesh.n_internal_faces /
 # mesh.n_cells / mesh.patches / mesh.cell_zones
 ```
+
+`build_mesh` 另接受 `bc_overlap_tol`（默认 `1e-4`），目前仅能通过
+`read_cgns` + `build_mesh` + `write_case` 流水线手动传入；常规用户走
+`convert_file` 即可。

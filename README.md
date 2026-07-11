@@ -22,7 +22,8 @@ src/                   # 转换器实现（Python 包，导入名 `src`）
 tests/
 ├── validate.py        # 重新读取写出的二进制网格做对比
 ├── run_all.py         # 三个 case 的端到端跑通脚本（含 checkMesh）
-└── test_box.py        # unittest 单元测试
+├── test_box.py        # unittest：拓扑统计与 ANSA 头格式
+└── test_bc_overlap.py # unittest：跨 zone 同名 BC 重叠裁剪
 cases/                 # 测试 case + ANSA 产生的参考 OpenFOAM 工程
 requirements.txt
 docs/
@@ -66,7 +67,7 @@ myCase/
 ├── constant/
 │   ├── polyMesh/
 │   │   ├── points              # binary vectorField（默认，ANSA 可回导）
-│   │   ├── faces               # ASCII faceList（ANSA 可解析；其余 mesh 为 binary）
+│   │   ├── faces               # binary faceCompactList
 │   │   ├── owner               # binary labelList
 │   │   ├── neighbour           # binary labelList（长度 = nFaces，边界面 -1）
 │   │   ├── boundary            # patch 字典（头 format binary，体 ASCII）
@@ -148,5 +149,9 @@ $FOAM_BASHRC                                # 环境变量覆盖
 
 ## 更多细节
 
-- 转换算法、数据结构、限制和扩展点详见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
-- 单元测试：`python3 -m unittest tests.test_box -v`
+- 转换算法、数据结构、ANSA 写出格式、BC 重叠裁剪、限制和扩展点详见
+  [docs/TECHNICAL.md](docs/TECHNICAL.md)（§2.1 写出选项、§3.5 BC 裁剪）。
+- 单元测试：
+  ```bash
+  python3 -m unittest tests.test_box tests.test_bc_overlap -v
+  ```
