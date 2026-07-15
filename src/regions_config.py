@@ -17,11 +17,13 @@ Expected path: ``<same-basename-as-cgns>.json`` (e.g. ``foo.cgns`` → ``foo.jso
       ]
     }
 
-Each entry is a CGNS zone name (matched flexibly). OpenFOAM region name =
-sanitized zone name (one zone → one region).
+Each entry is a CGNS zone name (matched flexibly). **All fluid zones are
+merged into one OpenFOAM region named ``fluid``**
+(``constant/fluid/polyMesh``). Each solid zone stays its own region
+(sanitized zone name).
 
 Optional foam2thermal-style ``regions`` with ``name`` / ``type`` / ``cellZones``
-is still accepted for multi-zone merge into one OpenFOAM region.
+is still accepted; fluids are likewise coalesced into ``fluid``.
 """
 
 from __future__ import annotations
@@ -138,6 +140,44 @@ def _loads_json_relaxed(text: str) -> Any:
         return json.loads(cleaned)
 
 
+# OpenFOAM directory / regionProperties name for the merged fluid polyMesh.
+MERGED_FLUID_REGION = "fluid"
+
+
+def _dedupe_preserve(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in items:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _merge_fluid_specs(specs: list[RegionSpec]) -> list[RegionSpec]:
+    """Collapse every fluid RegionSpec into one region named ``fluid``."""
+    fluid_zones: list[str] = []
+    solids: list[RegionSpec] = []
+    for s in specs:
+        if s.region_type == "fluid":
+            fluid_zones.extend(s.cell_zones)
+        else:
+            solids.append(s)
+    out: list[RegionSpec] = []
+    fluid_zones = _dedupe_preserve(fluid_zones)
+    if fluid_zones:
+        out.append(
+            RegionSpec(
+                name=MERGED_FLUID_REGION,
+                region_type="fluid",
+                cell_zones=fluid_zones,
+            )
+        )
+    out.extend(solids)
+    return out
+
+
 def _specs_from_fluid_solid_lists(data: dict[str, Any]) -> list[RegionSpec]:
     """Minimal format: ``fluid_regions`` / ``solid_regions`` (or ``fluid`` / ``solid``)."""
     fluid = data.get("fluid_regions")
@@ -149,15 +189,17 @@ def _specs_from_fluid_solid_lists(data: dict[str, Any]) -> list[RegionSpec]:
     if not fluid and not solid:
         return []
     specs: list[RegionSpec] = []
+    fluid_zones: list[str] = []
     for z in fluid or []:
         z = str(z).strip()
-        if not z:
-            continue
+        if z:
+            fluid_zones.append(z)
+    if fluid_zones:
         specs.append(
             RegionSpec(
-                name=_sanitize_patch_name(z),
+                name=MERGED_FLUID_REGION,
                 region_type="fluid",
-                cell_zones=[z],
+                cell_zones=_dedupe_preserve(fluid_zones),
             )
         )
     for z in solid or []:
@@ -221,12 +263,12 @@ def _specs_from_regions_dict(data: dict[str, Any]) -> list[RegionSpec]:
 def _parse_specs(data: dict[str, Any]) -> list[RegionSpec]:
     # Prefer the minimal fluid_regions / solid_regions layout.
     specs = _specs_from_fluid_solid_lists(data)
-    if specs:
-        return specs
-    specs = _specs_from_regions_list(data)
-    if specs:
-        return specs
-    return _specs_from_regions_dict(data)
+    if not specs:
+        specs = _specs_from_regions_list(data)
+    if not specs:
+        specs = _specs_from_regions_dict(data)
+    # Always coalesce fluids into constant/fluid/polyMesh.
+    return _merge_fluid_specs(specs)
 
 
 def load_regions_config(

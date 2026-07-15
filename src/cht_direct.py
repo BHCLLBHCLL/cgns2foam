@@ -293,7 +293,9 @@ def build_merged_region_mesh(
     cell_cursor = 0
     face_cursor = 0
     fv_cursor = 0
-    cell_labels_all: list[np.ndarray] = []
+    # Per-source-zone cellZones (useful for MRF) plus the merged region name.
+    cell_zones: list[CellZone] = []
+    all_labels: list[np.ndarray] = []
 
     for zi in indices:
         zone = case.zones[zi]
@@ -313,9 +315,11 @@ def build_merged_region_mesh(
         nb[nb >= 0] += cell_cursor
         neighbour[face_cursor:face_cursor + n_f] = nb
         flip[face_cursor:face_cursor + n_f] = zt.flip
-        cell_labels_all.append(
-            np.arange(cell_cursor, cell_cursor + n_c, dtype=np.int64)
-        )
+        labels = np.arange(cell_cursor, cell_cursor + n_c, dtype=np.int64)
+        all_labels.append(labels)
+        cz_name = _sanitize_patch_name(zone.name)
+        if cz_name != foam_name:
+            cell_zones.append(CellZone(name=cz_name, cell_labels=labels))
 
         vtx_cursor += n_v
         cell_cursor += n_c
@@ -330,6 +334,13 @@ def build_merged_region_mesh(
         indices, case, zone_topos, foam_name, report,
         face_offset=face_offset_list,
     )
+    cell_zones.insert(
+        0,
+        CellZone(
+            name=foam_name,
+            cell_labels=np.concatenate(all_labels) if all_labels else np.empty(0, dtype=np.int64),
+        ),
+    )
     return _assemble_ordered_mesh(
         points,
         face_offsets,
@@ -339,12 +350,7 @@ def build_merged_region_mesh(
         flip,
         plan,
         n_cells=n_cells,
-        cell_zones=[
-            CellZone(
-                name=foam_name,
-                cell_labels=np.concatenate(cell_labels_all),
-            )
-        ],
+        cell_zones=cell_zones,
     )
 
 

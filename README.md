@@ -112,8 +112,9 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 }
 ```
 
-每个字符串对应一个 CGNS zone；OpenFOAM 区域名取 sanitized zone 名（一对一）。
-也可使用可选的 foam2thermal 风格 `regions` + `cellZones`（多 zone 合并同一区域）。
+每个字符串对应一个 CGNS zone。**所有 `fluid_regions` 合并为单一区域
+`fluid`**（`constant/fluid/polyMesh`，域内流-流界面为 `cyclicAMI`）；
+每个固体 zone 各自一个区域（sanitized 名）。
 
 ```bash
 # --cht（两阶段）
