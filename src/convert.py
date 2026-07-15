@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .cht_case import write_cht_case
+from .cht_direct import convert_cht_direct
 from .couplings import CouplingReport, format_coupling_summary, scan_couplings
 from .reader import read_cgns
 from .topology import Mesh, build_mesh
@@ -21,17 +22,32 @@ def convert_file(
     verbose: bool = True,
     write_options: WriteOptions | None = None,
     cht: bool = False,
+    cht_direct: bool = False,
     solid_patterns: list[str] | None = None,
     fluid_patterns: list[str] | None = None,
-) -> Mesh:
+) -> Mesh | CouplingReport:
     """Convert ``cgns_path`` to an OpenFOAM case rooted at ``out_dir``.
 
-    When *cht* is True, also write ``chtMultiRegionSimpleFoam`` scaffolding
-    (regionProperties, per-region thermo / 0.orig, Allrun.pre) based on an
-    automatic coupling scan.
+    Modes:
 
-    Returns the intermediate :class:`~src.topology.Mesh`.
+    * default – mono-block polyMesh
+    * ``cht=True`` – mono polyMesh + CHT scaffolding (``Allrun.pre`` runs
+      ``splitMeshRegions``)
+    * ``cht_direct=True`` – one-step multi-region
+      ``chtMultiRegionSimpleFoam`` case (no mono mesh / no split)
+
+    Returns :class:`~src.topology.Mesh` for mono/cht modes, or
+    :class:`~src.couplings.CouplingReport` for ``cht_direct``.
     """
+    if cht_direct:
+        return convert_cht_direct(
+            cgns_path,
+            out_dir,
+            verbose=verbose,
+            solid_patterns=solid_patterns,
+            fluid_patterns=fluid_patterns,
+        )
+
     t0 = time.perf_counter()
     case = read_cgns(cgns_path)
     if verbose:

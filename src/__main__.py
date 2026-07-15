@@ -31,6 +31,7 @@ examples:
   %(prog)s --scan mesh.cgns
   %(prog)s --scan mesh.cgns --report couplings.json
   %(prog)s --cht mesh.cgns out_cht_case
+  %(prog)s --cht-direct mesh.cgns out_cht_ready
 """.rstrip(),
     )
     p.add_argument("cgns_file", help="Path to the input .cgns file")
@@ -71,9 +72,17 @@ examples:
         "--cht",
         action="store_true",
         help=(
-            "After conversion, write chtMultiRegionSimpleFoam scaffolding "
-            "from an automatic coupling scan (regionProperties, "
-            "per-region thermo/0.orig, Allrun.pre). Implies a coupling scan."
+            "Mono polyMesh + chtMultiRegionSimpleFoam scaffolding "
+            "(Allrun.pre runs splitMeshRegions). Implies a coupling scan."
+        ),
+    )
+    p.add_argument(
+        "--cht-direct",
+        action="store_true",
+        help=(
+            "One-step CGNS -> multi-region chtMultiRegionSimpleFoam case: "
+            "each zone becomes constant/<region>/polyMesh with mappedWall "
+            "couplings. No mono mesh and no splitMeshRegions."
         ),
     )
     p.add_argument(
@@ -107,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: not a file: {cgns_path}", file=sys.stderr)
         return 2
 
-    if args.scan and not args.cht:
+    if args.scan and not args.cht and not args.cht_direct:
         report_path = args.report
         scan_file(
             cgns_path,
@@ -117,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
             fluid_patterns=args.fluid_pattern,
         )
         return 0
+
+    if args.cht and args.cht_direct:
+        print("error: use either --cht or --cht-direct, not both", file=sys.stderr)
+        return 2
 
     out_dir = args.output_dir
     if out_dir is None:
@@ -130,12 +143,12 @@ def main(argv: list[str] | None = None) -> int:
         verbose=not args.quiet,
         write_options=write_opts,
         cht=args.cht or False,
+        cht_direct=args.cht_direct or False,
         solid_patterns=args.solid_pattern,
         fluid_patterns=args.fluid_pattern,
     )
 
-    if args.cht and args.report:
-        # Extra copy of the coupling report outside the case dir if requested
+    if (args.cht or args.cht_direct) and args.report:
         from pathlib import Path
         import shutil
         src = Path(out_dir) / "coupling_scan.json"

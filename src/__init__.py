@@ -12,12 +12,14 @@ Public entry point: :func:`src.convert.convert_file`.
 """
 
 from .convert import convert_file, scan_file  # noqa: F401
+from .cht_direct import convert_cht_direct  # noqa: F401
 from .reader import read_cgns      # noqa: F401
 from .writer import WriteOptions   # noqa: F401
 from .couplings import scan_couplings, format_coupling_summary  # noqa: F401
 
 __all__ = [
     "convert_file",
+    "convert_cht_direct",
     "scan_file",
     "read_cgns",
     "WriteOptions",

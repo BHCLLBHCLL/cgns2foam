@@ -56,6 +56,11 @@ class Patch:
     bc_type: str          # OpenFOAM patch type, e.g. "wall", "patch"
     start_face: int = 0
     n_faces: int = 0
+    # Optional extras for multi-region CHT patches
+    sample_mode: str | None = None
+    sample_region: str | None = None
+    sample_patch: str | None = None
+    neighbour_patch: str | None = None
 
 
 @dataclass
@@ -682,4 +687,116 @@ def build_mesh(case: CGNSCase, *, default_exterior_name: str = "default_exterior
         n_cells=n_cells_total,
         patches=final_patches,
         cell_zones=cell_zones,
+    )
+
+
+def _assemble_ordered_mesh(
+    points: np.ndarray,
+    face_offsets: np.ndarray,
+    face_vertices: np.ndarray,
+    owner: np.ndarray,
+    neighbour: np.ndarray,
+    flip: np.ndarray,
+    patches: list[tuple],
+    *,
+    n_cells: int,
+    cell_zones: list[CellZone] | None = None,
+) -> Mesh:
+    """Reorder faces (internal first, then patches) into an OpenFOAM Mesh.
+
+    *patches* entries are ``(name, foam_type, face_ids[, extras_dict])``.
+    """
+    n_faces = int(owner.size)
+    is_internal = neighbour >= 0
+    internal_ids = np.where(is_internal)[0]
+    sort_key = owner[internal_ids].astype(np.int64) * (n_cells + 1) + neighbour[internal_ids]
+    int_order = internal_ids[np.argsort(sort_key, kind="stable")]
+
+    boundary_order_chunks: list[np.ndarray] = []
+    final_patches: list[Patch] = []
+    cursor = int(int_order.size)
+    for entry in patches:
+        name, foam_type, face_ids = entry[0], entry[1], entry[2]
+        extras = entry[3] if len(entry) > 3 else {}
+        if face_ids.size == 0:
+            continue
+        boundary_order_chunks.append(face_ids)
+        final_patches.append(
+            Patch(
+                name=name,
+                bc_type=foam_type,
+                start_face=cursor,
+                n_faces=int(face_ids.size),
+                sample_mode=extras.get("sample_mode"),
+                sample_region=extras.get("sample_region"),
+                sample_patch=extras.get("sample_patch"),
+                neighbour_patch=extras.get("neighbour_patch"),
+            )
+        )
+        cursor += int(face_ids.size)
+
+    if boundary_order_chunks:
+        bnd_order = np.concatenate(boundary_order_chunks)
+    else:
+        bnd_order = np.empty(0, dtype=np.int64)
+    new_order = np.concatenate([int_order, bnd_order])
+    if new_order.size != n_faces:
+        raise ValueError(
+            f"face reorder mismatch: {new_order.size} vs {n_faces}"
+        )
+
+    new_owner = owner[new_order].astype(np.int32, copy=False)
+    new_neighbour = neighbour[new_order]
+    new_flip = flip[new_order]
+    face_sizes = (face_offsets[1:] - face_offsets[:-1])[new_order]
+    new_face_offsets = np.empty(n_faces + 1, dtype=np.int64)
+    new_face_offsets[0] = 0
+    np.cumsum(face_sizes, out=new_face_offsets[1:])
+    new_face_vertices = np.empty(int(new_face_offsets[-1]), dtype=np.int32)
+    for new_fi, old_fi in enumerate(new_order):
+        s = int(face_offsets[old_fi])
+        e = int(face_offsets[old_fi + 1])
+        verts = face_vertices[s:e]
+        if new_flip[new_fi]:
+            verts = verts[::-1]
+        new_face_vertices[int(new_face_offsets[new_fi]):int(new_face_offsets[new_fi + 1])] = verts
+
+    n_internal = int(int_order.size)
+    return Mesh(
+        points=np.asarray(points, dtype=np.float64),
+        face_offsets=new_face_offsets.astype(np.int32, copy=False),
+        face_vertices=new_face_vertices,
+        owner=new_owner,
+        neighbour=new_neighbour[:n_internal].astype(np.int32, copy=False),
+        n_internal_faces=n_internal,
+        n_cells=n_cells,
+        patches=final_patches,
+        cell_zones=list(cell_zones or []),
+    )
+
+
+def build_zone_mesh(
+    zone: CGNSZone,
+    zt: _ZoneTopo,
+    patches: list[tuple],
+    *,
+    cell_zone_name: str | None = None,
+) -> Mesh:
+    """Build a single-region :class:`Mesh` from one zone topology + patch plan."""
+    name = cell_zone_name or _sanitize_patch_name(zone.name)
+    return _assemble_ordered_mesh(
+        zone.coords,
+        zt.face_offsets,
+        zt.face_vertices,
+        zt.owner,
+        zt.neighbour,
+        zt.flip,
+        patches,
+        n_cells=zt.n_cells,
+        cell_zones=[
+            CellZone(
+                name=name,
+                cell_labels=np.arange(zt.n_cells, dtype=np.int64),
+            )
+        ],
     )

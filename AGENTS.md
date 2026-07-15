@@ -16,7 +16,8 @@ headers, cross-zone BC overlap trimming, coupling scan (`--scan`), and
   ```bash
   python -m src path/to/case.cgns [out_dir]
   python -m src --scan path/to/case.cgns --report couplings.json
-  python -m src --cht path/to/case.cgns out_cht
+  python -m src --cht path/to/case.cgns out_cht          # mono + Allrun.pre
+  python -m src --cht-direct path/to/case.cgns out_cht   # one-step multi-region
   ```
 - **Tests**:
   ```bash

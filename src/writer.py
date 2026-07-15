@@ -368,10 +368,24 @@ def _write_boundary(path: str, mesh: Mesh, source: str,
         f"{len(mesh.patches)}\n(\n",
     ]
     for p in mesh.patches:
+        extra = ""
+        if p.bc_type == "mappedWall":
+            extra = (
+                f"\t\tsampleMode {p.sample_mode or 'nearestPatchFace'};\n"
+                f"\t\tsampleRegion {p.sample_region};\n"
+                f"\t\tsamplePatch {p.sample_patch};\n"
+            )
+        elif p.bc_type == "cyclicAMI" and p.neighbour_patch:
+            extra = (
+                f"\t\tneighbourPatch {p.neighbour_patch};\n"
+                f"\t\tmatchTolerance 0.001;\n"
+                f"\t\ttransform noOrdering;\n"
+            )
         if options.ansa_headers:
             lines.append(
                 f"\n\t{p.name}\n\t{{\n"
                 f"\t\ttype {p.bc_type};\n"
+                f"{extra}"
                 f"\t\tstartFace {p.start_face};\n"
                 f"\t\tnFaces {p.n_faces};\n"
                 f"\t}}\n"
@@ -380,6 +394,7 @@ def _write_boundary(path: str, mesh: Mesh, source: str,
             lines.append(
                 f"\n\t{p.name}\n\t{{\n"
                 f"\t\ttype {p.bc_type};\n"
+                f"{extra}"
                 f"\t\tnFaces {p.n_faces};\n"
                 f"\t\tstartFace {p.start_face};\n"
                 f"\t}}\n"
@@ -645,3 +660,22 @@ def write_case(out_dir: str, mesh: Mesh, source_path: str,
     )
 
     _write_initial_conditions(zerd, mesh, source_path, options)
+
+
+def write_poly_mesh(
+    poly_dir: str,
+    mesh: Mesh,
+    source_path: str,
+    options: WriteOptions | None = None,
+) -> None:
+    """Write only ``polyMesh/{points,faces,owner,neighbour,boundary,...}``."""
+    if options is None:
+        options = WriteOptions()
+    os.makedirs(poly_dir, exist_ok=True)
+    _write_points(os.path.join(poly_dir, "points"), mesh, source_path, options)
+    _write_faces(os.path.join(poly_dir, "faces"), mesh, source_path, options)
+    _write_owner(os.path.join(poly_dir, "owner"), mesh, source_path, options)
+    _write_neighbour(os.path.join(poly_dir, "neighbour"), mesh, source_path, options)
+    _write_boundary(os.path.join(poly_dir, "boundary"), mesh, source_path, options)
+    _write_cell_zones(os.path.join(poly_dir, "cellZones"), mesh, source_path, options)
+    _write_face_zones(os.path.join(poly_dir, "faceZones"), source_path, options)

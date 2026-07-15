@@ -288,6 +288,24 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 区域划分依赖 OpenFOAM `splitMeshRegions -cellZonesOnly`（在 `Allrun.pre`
 中执行）。
 
+**一步直接多区域（`--cht-direct`）**：
+
+实现：`src/cht_direct.py`。每个 CGNS zone **直接**写成
+`constant/<region>/polyMesh`，耦合面改为
+
+```
+{local}_to_{remote}
+    type mappedWall;
+    sampleRegion {remote};
+    samplePatch  {remote}_to_{local};
+```
+
+跳过 mono 拼接与 `splitMeshRegions`。拓扑只构建一次（含 BC 裁剪），
+随后扫描耦合并按区域写出。`Allrun` 仅调用 `chtMultiRegionSimpleFoam`。
+
+适用：希望减少转换环节、降低 split 出错概率的场景。若仍需 mono 网格上
+`createPatch`/AMI baffles 再 split，继续用 `--cht`。
+
 ---
 
 ## 4. 生成的 OpenFOAM 文件汇总
@@ -401,20 +419,19 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 python3 -m src <in.cgns> [out_dir] [-q|--quiet]
 python3 -m src --openfoam-native <in.cgns> [out_dir]   # 非 ANSA 头
 python3 -m src --scan <in.cgns> [--report couplings.json]
-python3 -m src --cht <in.cgns> [out_dir]               # polyMesh + CHT 脚手架
+python3 -m src --cht <in.cgns> [out_dir]               # mono + CHT 脚手架
+python3 -m src --cht-direct <in.cgns> [out_dir]        # 一步多区域 CHT
 python3 tests/run_all.py [--with-checkmesh] [--out-root /tmp/out]
 python3 -m unittest tests.test_box tests.test_bc_overlap tests.test_couplings -v
 ```
 
 ```python
-from src import read_cgns, convert_file, scan_file, WriteOptions
+from src import read_cgns, convert_file, convert_cht_direct, scan_file, WriteOptions
 
 case = read_cgns("in.cgns")
 report = scan_file("in.cgns", report_path="couplings.json")
-mesh = convert_file("in.cgns", "out")           # 默认 WriteOptions()
-mesh = convert_file("in.cgns", "cht_out", cht=True)
-mesh = convert_file(
-    "in.cgns", "out",
-    write_options=WriteOptions.openfoam_native(),
-)
+mesh = convert_file("in.cgns", "out")
+mesh = convert_file("in.cgns", "cht_out", cht=True)          # mono + split 脚手架
+report = convert_file("in.cgns", "cht_ready", cht_direct=True)  # 一步多区域
+# 或: convert_cht_direct("in.cgns", "cht_ready")
 ```

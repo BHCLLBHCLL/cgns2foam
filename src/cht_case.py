@@ -353,15 +353,23 @@ def _field_T(region_type: str, patches: list[str], T0: float = 300.0) -> str:
     kappa = "fluidThermo" if region_type == "fluid" else "solidThermo"
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower():
+        if "ami" in p.lower() and "_to_" not in p:
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
+        elif "_to_" in p:
+            blocks.append(
+                f"""    {p}
+    {{
+        type            compressible::turbulentTemperatureRadCoupledMixed;
+        Tnbr            T;
+        kappaMethod     {kappa};
+        value           $internalField;
+    }}"""
+            )
         else:
             blocks.append(
                 f"""    {p}
     {{
         type            zeroGradient;
-        // Couplings become compressible::turbulentTemperatureRadCoupledMixed
-        // after splitMeshRegions (kappaMethod {kappa}).
     }}"""
             )
     body = "\n\n".join(blocks) if blocks else "    // (no patches yet)"
@@ -384,8 +392,15 @@ boundaryField
 def _field_U(patches: list[str]) -> str:
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower():
+        if "ami" in p.lower() and "_to_" not in p:
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
+        elif "_to_" in p:
+            blocks.append(
+                f"""    {p}
+    {{
+        type            noSlip;
+    }}"""
+            )
         elif p.startswith("open"):
             blocks.append(
                 f"""    {p}
@@ -421,7 +436,7 @@ boundaryField
 def _field_p(patches: list[str], p0: float = 101325.0) -> str:
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower():
+        if "ami" in p.lower() and "_to_" not in p:
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
         else:
             blocks.append(
@@ -451,7 +466,7 @@ boundaryField
 def _field_p_rgh(patches: list[str]) -> str:
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower():
+        if "ami" in p.lower() and "_to_" not in p:
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
         elif p.startswith("open"):
             blocks.append(

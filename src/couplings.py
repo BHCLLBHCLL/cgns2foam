@@ -163,6 +163,21 @@ def _bc_face_keys(
     }
 
 
+def prepare_zone_topos(
+    case: CGNSCase,
+    *,
+    point_tol: float = 1e-4,
+    trim: bool = True,
+) -> list[_ZoneTopo]:
+    """Build (and optionally BC-trim) per-zone topologies once."""
+    if not case.zones:
+        raise ValueError("CGNS case contains no zones")
+    zone_topos = [_build_zone_topology(z) for z in case.zones]
+    if trim:
+        _trim_cross_zone_bc_overlaps(case.zones, zone_topos, point_tol=point_tol)
+    return zone_topos
+
+
 def scan_couplings(
     case: CGNSCase,
     *,
@@ -172,21 +187,24 @@ def scan_couplings(
     fluid_patterns: list[str] | None = None,
     trim: bool = True,
     min_overlap_faces: int = 1,
+    zone_topos: list[_ZoneTopo] | None = None,
 ) -> CouplingReport:
     """Scan a loaded CGNS case for regions and coupling interface pairs.
 
     Steps:
 
-    1. Build per-zone topology and optionally apply cross-zone BC trim.
+    1. Build per-zone topology and optionally apply cross-zone BC trim
+       (skipped when *zone_topos* is supplied).
     2. Classify each zone as fluid / solid.
     3. Pair FaceCenter BCs that share geometric faces across distinct zones.
     """
     if not case.zones:
         raise ValueError("CGNS case contains no zones")
 
-    zone_topos = [_build_zone_topology(z) for z in case.zones]
-    if trim:
-        _trim_cross_zone_bc_overlaps(case.zones, zone_topos, point_tol=point_tol)
+    if zone_topos is None:
+        zone_topos = prepare_zone_topos(case, point_tol=point_tol, trim=trim)
+    elif len(zone_topos) != len(case.zones):
+        raise ValueError("zone_topos length must match number of CGNS zones")
 
     regions: list[RegionInfo] = []
     zone_types: list[str] = []

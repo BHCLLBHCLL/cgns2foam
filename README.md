@@ -17,7 +17,8 @@ src/                   # 转换器实现（Python 包，导入名 `src`）
 ├── reader.py          # 基于 h5py 的 CGNS 读取（CPEX-0001 / SIDS-to-HDF5）
 ├── topology.py        # NGON / NFACE → OpenFOAM polyMesh 拓扑与重排
 ├── couplings.py       # 扫描流-流 / 流-固 / 固-固耦合界面对
-├── cht_case.py        # chtMultiRegionSimpleFoam 算例脚手架
+├── cht_case.py        # chtMultiRegionSimpleFoam 脚手架（mono + split）
+├── cht_direct.py      # 一步 CGNS -> 多区域 CHT
 ├── writer.py          # OpenFOAM polyMesh / system / constant / 0 文件生成
 ├── convert.py         # 高层流水线（reader → topology → writer [→ CHT]）
 └── __main__.py        # `python -m src` 命令行入口
@@ -65,8 +66,11 @@ python3 -m src --openfoam-native path/to/case.cgns /tmp/myCase
 python3 -m src --scan path/to/case.cgns
 python3 -m src --scan path/to/case.cgns --report couplings.json
 
-# 转换并生成 chtMultiRegionSimpleFoam 脚手架
+# 转换并生成 CHT 脚手架（mono + Allrun.pre/splitMeshRegions）
 python3 -m src --cht path/to/case.cgns /tmp/myChtCase
+
+# 一步到位：CGNS -> 多区域 chtMultiRegionSimpleFoam（无需 split）
+python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 ```
 
 ### 耦合扫描与 CHT 模式
@@ -74,16 +78,17 @@ python3 -m src --cht path/to/case.cgns /tmp/myChtCase
 | 开关 | 作用 |
 |------|------|
 | `--scan` | 读取 CGNS zone / BC，输出流-流、流-固、固-固耦合关系与界面对 |
-| `--cht` | 先扫描耦合，再写出 mono polyMesh + CHT 算例文件（`regionProperties`、`0.orig/<region>`、`Allrun.pre` 等） |
+| `--cht` | mono polyMesh + CHT 脚手架；`Allrun.pre` 再跑 `splitMeshRegions` |
+| `--cht-direct` | **一步**写出 `constant/<region>/polyMesh` + 耦合 `mappedWall`，可直接 `./Allrun` |
 | `--report PATH` | 将扫描结果写为 JSON |
 | `--solid-pattern` / `--fluid-pattern` | 覆盖固体 / 流体 zone 命名规则（可重复） |
 
-`--cht` 生成算例后，在 OpenFOAM v2412 环境中执行：
-
 ```bash
-cd /tmp/myChtCase
-./Allrun.pre   # createPatch(可选) + splitMeshRegions + restore0Dir
-./Allrun       # chtMultiRegionSimpleFoam
+# --cht（两阶段）
+cd /tmp/myChtCase && ./Allrun.pre && ./Allrun
+
+# --cht-direct（一步）
+cd /tmp/myChtReady && ./Allrun
 ```
 
 生成的目录结构为标准 OpenFOAM 工程（v2412 期望布局）：
@@ -123,6 +128,11 @@ print(report.fluid_regions, len(report.couplings))
 
 # 转换 + CHT 脚手架
 mesh = convert_file("case.cgns", "cht_out", cht=True)
+
+# 一步多区域 CHT
+from src import convert_cht_direct
+convert_cht_direct("case.cgns", "cht_ready")
+# 或: convert_file("case.cgns", "cht_ready", cht_direct=True)
 
 # OpenFOAM 原生 binary 输出
 mesh = convert_file(
