@@ -349,13 +349,32 @@ value           ({gx} {gy} {gz});
     )
 
 
-def _field_T(region_type: str, patches: list[str], T0: float = 300.0) -> str:
+def _is_cyclic_ami_patch(name: str, patch_types: dict[str, str] | None) -> bool:
+    if patch_types and patch_types.get(name) == "cyclicAMI":
+        return True
+    low = name.lower()
+    return low.startswith("ami_") or ("ami" in low and "_to_" not in low)
+
+
+def _is_mapped_wall_patch(name: str, patch_types: dict[str, str] | None) -> bool:
+    if patch_types and patch_types.get(name) == "mappedWall":
+        return True
+    return "_to_" in name
+
+
+def _field_T(
+    region_type: str,
+    patches: list[str],
+    T0: float = 300.0,
+    *,
+    patch_types: dict[str, str] | None = None,
+) -> str:
     kappa = "fluidThermo" if region_type == "fluid" else "solidThermo"
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower() and "_to_" not in p:
+        if _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
-        elif "_to_" in p:
+        elif _is_mapped_wall_patch(p, patch_types):
             blocks.append(
                 f"""    {p}
     {{
@@ -389,12 +408,16 @@ boundaryField
     )
 
 
-def _field_U(patches: list[str]) -> str:
+def _field_U(
+    patches: list[str],
+    *,
+    patch_types: dict[str, str] | None = None,
+) -> str:
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower() and "_to_" not in p:
+        if _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
-        elif "_to_" in p:
+        elif _is_mapped_wall_patch(p, patch_types):
             blocks.append(
                 f"""    {p}
     {{
@@ -433,10 +456,15 @@ boundaryField
     )
 
 
-def _field_p(patches: list[str], p0: float = 101325.0) -> str:
+def _field_p(
+    patches: list[str],
+    p0: float = 101325.0,
+    *,
+    patch_types: dict[str, str] | None = None,
+) -> str:
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower() and "_to_" not in p:
+        if _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
         else:
             blocks.append(
@@ -463,10 +491,14 @@ boundaryField
     )
 
 
-def _field_p_rgh(patches: list[str]) -> str:
+def _field_p_rgh(
+    patches: list[str],
+    *,
+    patch_types: dict[str, str] | None = None,
+) -> str:
     blocks: list[str] = []
     for p in patches:
-        if "ami" in p.lower() and "_to_" not in p:
+        if _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
         elif p.startswith("open"):
             blocks.append(
@@ -633,18 +665,20 @@ def write_cht_case(
         raise ValueError("Coupling report has no fluid/solid regions")
 
     region_by_foam = {r.foam_name: r for r in report.regions}
+    bcs_by_foam: dict[str, set[str]] = {}
+    for r in report.regions:
+        bcs_by_foam.setdefault(r.foam_name, set()).update(r.bc_names)
     patch_names = [p.name for p in mesh.patches]
 
-    # Map foam region → patches that belong to that zone's original BCs
-    # (approximate: patches whose name stem matches a BC of that region)
+    # Map foam region → patches that belong to that region's original BCs
     def patches_for_region(foam_name: str) -> list[str]:
-        reg = region_by_foam.get(foam_name)
-        if not reg:
+        bc_set = bcs_by_foam.get(foam_name) or set()
+        if not bc_set:
             return list(patch_names)
-        bc_set = set(reg.bc_names)
-        owned = [p for p in patch_names if p in bc_set or any(
-            p == b or p.startswith(b + "_") for b in bc_set
-        )]
+        owned = [
+            p for p in patch_names
+            if p in bc_set or any(p == b or p.startswith(b + "_") for b in bc_set)
+        ]
         return owned if owned else list(patch_names)
 
     # --- top-level system / constant ---
@@ -659,6 +693,10 @@ def write_cht_case(
     ami_pairs: list[tuple[str, str]] = []
     for c in report.couplings:
         if c.method != CouplingMethod.CYCLIC_AMI:
+            continue
+        # createPatch AMI only makes sense within one polyMesh before split —
+        # restrict to pairs that share an OpenFOAM region (merged cellZones).
+        if c.master_region and c.slave_region and c.master_region != c.slave_region:
             continue
         # Patch names in mono mesh are disambiguated; find BC-based names
         master_patches = [

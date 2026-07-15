@@ -1,9 +1,14 @@
 """Scan CGNS zones for fluid/solid regions and coupling interface pairs.
 
 Couplings are inferred from FaceCenter BC geometry: same-named (or geometrically
-coincident) boundary faces shared by two zones form an interface.  Zone type is
-heuristic (``solid_region`` / ``solid.`` → solid, else fluid) and can be refined
-via explicit solid/fluid name patterns.
+coincident) boundary faces shared by two zones form an interface.
+
+When a sidecar ``<cgns>.json`` is supplied (required for ``--cht`` /
+``--cht-direct``), zone types and OpenFOAM region names come from that file.
+Interface methods are then forced by region types:
+
+* fluid–fluid → ``cyclicAMI``
+* fluid–solid / solid–solid → ``mappedWall``
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from .reader import CGNSCase, CGNSZone
+from .regions_config import RegionsConfig
 from .topology import (
     _ZoneTopo,
     _build_zone_topology,
@@ -60,6 +66,8 @@ class CouplingPair:
     slave_bc: str
     n_faces: int
     note: str = ""
+    master_region: str = ""
+    slave_region: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -75,6 +83,7 @@ class CouplingReport:
     fluid_regions: list[str]
     solid_regions: list[str]
     source: str = ""
+    regions_json: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         by_kind: dict[str, list[dict]] = {
@@ -86,6 +95,7 @@ class CouplingReport:
             by_kind[c.kind.value].append(c.to_dict())
         return {
             "source": self.source,
+            "regions_json": self.regions_json,
             "fluid_regions": self.fluid_regions,
             "solid_regions": self.solid_regions,
             "regions": [asdict(r) for r in self.regions],
@@ -95,16 +105,18 @@ class CouplingReport:
         }
 
 
-_AMI_RE = re.compile(r"ami_rot\d+|.*rotation\d*", re.I)
-
-
 def classify_zone_type(
     zone_name: str,
     *,
     solid_patterns: list[str] | None = None,
     fluid_patterns: list[str] | None = None,
+    regions_config: RegionsConfig | None = None,
 ) -> str:
     """Return ``\"solid\"`` or ``\"fluid\"`` for a CGNS zone name."""
+    if regions_config is not None:
+        hit = regions_config.region_type_for(zone_name)
+        if hit is not None:
+            return hit
     name = zone_name.lower()
     for pat in solid_patterns or []:
         if re.search(pat, zone_name, re.I) or re.search(pat, name, re.I):
@@ -115,8 +127,41 @@ def classify_zone_type(
     return "solid" if _zone_is_solid(zone_name) else "fluid"
 
 
-def _looks_ami(name: str) -> bool:
-    return bool(_AMI_RE.fullmatch(name) or _AMI_RE.search(name))
+def foam_name_for_zone(
+    zone_name: str,
+    *,
+    regions_config: RegionsConfig | None = None,
+) -> str:
+    if regions_config is not None:
+        hit = regions_config.foam_name_for(zone_name)
+        if hit is not None:
+            return hit
+    return _sanitize_patch_name(zone_name)
+
+
+def classify_interface_method(
+    type_a: str,
+    type_b: str,
+    *,
+    same_foam_region: bool = False,
+) -> tuple[CouplingKind, CouplingMethod]:
+    """Map region types to coupling kind / OpenFOAM interface method.
+
+    Rule (CHT):
+
+    * fluid–fluid → ``cyclicAMI`` (including AMI pairs inside a merged fluid
+      region such as air_domain ↔ rotation*)
+    * fluid–solid / solid–solid → ``mappedWall`` when the sides belong to
+      different OpenFOAM regions; same-region solid interfaces → ``stitch``
+    """
+    if type_a == "fluid" and type_b == "fluid":
+        return CouplingKind.FLUID_FLUID, CouplingMethod.CYCLIC_AMI
+    if type_a == "solid" and type_b == "solid":
+        kind = CouplingKind.SOLID_SOLID
+        if same_foam_region:
+            return kind, CouplingMethod.STITCH
+        return kind, CouplingMethod.MAPPED_WALL
+    return CouplingKind.FLUID_SOLID, CouplingMethod.MAPPED_WALL
 
 
 def _classify_pair(
@@ -126,25 +171,13 @@ def _classify_pair(
     bc_b: str,
     zone_a: str,
     zone_b: str,
+    *,
+    foam_a: str = "",
+    foam_b: str = "",
 ) -> tuple[CouplingKind, CouplingMethod]:
-    ami = (
-        _looks_ami(bc_a)
-        or _looks_ami(bc_b)
-        or _looks_ami(zone_a)
-        or _looks_ami(zone_b)
-        or "rotation" in zone_a.lower()
-        or "rotation" in zone_b.lower()
-    )
-    if type_a == "fluid" and type_b == "fluid":
-        kind = CouplingKind.FLUID_FLUID
-        method = CouplingMethod.CYCLIC_AMI if ami else CouplingMethod.MAPPED_WALL
-    elif type_a == "solid" and type_b == "solid":
-        kind = CouplingKind.SOLID_SOLID
-        method = CouplingMethod.MAPPED_WALL
-    else:
-        kind = CouplingKind.FLUID_SOLID
-        method = CouplingMethod.MAPPED_WALL
-    return kind, method
+    _ = (bc_a, bc_b, zone_a, zone_b)
+    same = bool(foam_a and foam_b and foam_a == foam_b)
+    return classify_interface_method(type_a, type_b, same_foam_region=same)
 
 
 def _bc_face_keys(
@@ -185,6 +218,7 @@ def scan_couplings(
     point_tol: float = 1e-4,
     solid_patterns: list[str] | None = None,
     fluid_patterns: list[str] | None = None,
+    regions_config: RegionsConfig | None = None,
     trim: bool = True,
     min_overlap_faces: int = 1,
     zone_topos: list[_ZoneTopo] | None = None,
@@ -195,8 +229,10 @@ def scan_couplings(
 
     1. Build per-zone topology and optionally apply cross-zone BC trim
        (skipped when *zone_topos* is supplied).
-    2. Classify each zone as fluid / solid.
+    2. Classify each zone as fluid / solid (JSON sidecar preferred).
     3. Pair FaceCenter BCs that share geometric faces across distinct zones.
+    4. Assign interface method: fluid–fluid → cyclicAMI; else mappedWall
+       (except same-region solid → stitch).
     """
     if not case.zones:
         raise ValueError("CGNS case contains no zones")
@@ -208,18 +244,22 @@ def scan_couplings(
 
     regions: list[RegionInfo] = []
     zone_types: list[str] = []
+    foam_names: list[str] = []
     for zone, zt in zip(case.zones, zone_topos):
         rtype = classify_zone_type(
             zone.name,
             solid_patterns=solid_patterns,
             fluid_patterns=fluid_patterns,
+            regions_config=regions_config,
         )
+        fname = foam_name_for_zone(zone.name, regions_config=regions_config)
         zone_types.append(rtype)
+        foam_names.append(fname)
         bc_names = sorted(zt.bc_face_lists.keys())
         regions.append(
             RegionInfo(
                 zone_name=zone.name,
-                foam_name=_sanitize_patch_name(zone.name),
+                foam_name=fname,
                 region_type=rtype,
                 n_cells=int(zt.n_cells),
                 n_vertices=int(zt.n_vertices),
@@ -246,15 +286,12 @@ def scan_couplings(
             zi_b, bc_b, keys_b = entries[j]
             if zi_a == zi_b:
                 continue
-            # Same-named BC preferred; otherwise require substantial geometric overlap
-            # and matching stem after sanitize.
             same_name = _sanitize_patch_name(bc_a) == _sanitize_patch_name(bc_b)
             inter = keys_a & keys_b
             n_ov = len(inter)
             if n_ov < min_overlap_faces:
                 continue
             if not same_name:
-                # Geometric-only match: both sides must be mostly overlapping
                 ratio_a = n_ov / max(len(keys_a), 1)
                 ratio_b = n_ov / max(len(keys_b), 1)
                 if ratio_a < 0.9 or ratio_b < 0.9:
@@ -273,20 +310,30 @@ def scan_couplings(
             seen.add(key)
 
             type_a, type_b = zone_types[zi_a], zone_types[zi_b]
-            kind, method = _classify_pair(type_a, type_b, bc_a, bc_b, zone_a, zone_b)
+            foam_a, foam_b = foam_names[zi_a], foam_names[zi_b]
+            kind, method = _classify_pair(
+                type_a, type_b, bc_a, bc_b, zone_a, zone_b,
+                foam_a=foam_a, foam_b=foam_b,
+            )
 
             # Stable master/slave: fluid before solid; else lexicographic zone name
             if type_a == type_b:
                 if zone_a <= zone_b:
                     master_z, slave_z, master_bc, slave_bc = zone_a, zone_b, bc_a, bc_b
+                    master_r, slave_r = foam_a, foam_b
                 else:
                     master_z, slave_z, master_bc, slave_bc = zone_b, zone_a, bc_b, bc_a
+                    master_r, slave_r = foam_b, foam_a
             elif type_a == "fluid":
                 master_z, slave_z, master_bc, slave_bc = zone_a, zone_b, bc_a, bc_b
+                master_r, slave_r = foam_a, foam_b
             else:
                 master_z, slave_z, master_bc, slave_bc = zone_b, zone_a, bc_b, bc_a
+                master_r, slave_r = foam_b, foam_a
 
             note = "same_bc_name" if same_name else "geometric_match"
+            if master_r == slave_r:
+                note += ";same_region"
             couplings.append(
                 CouplingPair(
                     kind=kind,
@@ -297,19 +344,38 @@ def scan_couplings(
                     slave_bc=slave_bc,
                     n_faces=n_ov,
                     note=note,
+                    master_region=master_r,
+                    slave_region=slave_r,
                 )
             )
 
     couplings.sort(key=lambda c: (c.kind.value, -c.n_faces, c.master_zone, c.slave_zone))
 
-    fluid = [r.foam_name for r in regions if r.region_type == "fluid"]
-    solid = [r.foam_name for r in regions if r.region_type == "solid"]
+    if regions_config is not None:
+        fluid = regions_config.fluid_regions()
+        solid = regions_config.solid_regions()
+        # Include any unmatched zones that still appear in the scan
+        for r in regions:
+            if r.region_type == "fluid" and r.foam_name not in fluid:
+                fluid.append(r.foam_name)
+            if r.region_type == "solid" and r.foam_name not in solid:
+                solid.append(r.foam_name)
+    else:
+        fluid = []
+        solid = []
+        for r in regions:
+            if r.region_type == "fluid" and r.foam_name not in fluid:
+                fluid.append(r.foam_name)
+            elif r.region_type == "solid" and r.foam_name not in solid:
+                solid.append(r.foam_name)
+
     return CouplingReport(
         regions=regions,
         couplings=couplings,
         fluid_regions=fluid,
         solid_regions=solid,
         source=source,
+        regions_json=str(regions_config.path) if regions_config else "",
     )
 
 
@@ -317,14 +383,21 @@ def format_coupling_summary(report: CouplingReport) -> str:
     """Human-readable multi-line summary for CLI stdout."""
     lines = [
         f"source: {report.source or '(in-memory)'}",
-        f"regions: {len(report.regions)} "
-        f"(fluid={len(report.fluid_regions)}, solid={len(report.solid_regions)})",
-        "",
-        "=== Regions ===",
     ]
+    if report.regions_json:
+        lines.append(f"regions_json: {report.regions_json}")
+    lines.extend(
+        [
+            f"regions: {len(report.regions)} CGNS zones → "
+            f"OpenFOAM fluid={len(report.fluid_regions)}, "
+            f"solid={len(report.solid_regions)}",
+            "",
+            "=== Regions (CGNS zone → OpenFOAM) ===",
+        ]
+    )
     for r in report.regions:
         lines.append(
-            f"  [{r.region_type:5}] {r.foam_name}  "
+            f"  [{r.region_type:5}] {r.zone_name}  →  {r.foam_name}  "
             f"cells={r.n_cells}  bcs={len(r.bc_names)}"
         )
     lines.append("")
@@ -340,8 +413,8 @@ def format_coupling_summary(report: CouplingReport) -> str:
             continue
         for c in items:
             lines.append(
-                f"  {c.master_zone}:{c.master_bc}  <->  "
-                f"{c.slave_zone}:{c.slave_bc}  "
+                f"  {c.master_region or c.master_zone}:{c.master_bc}  <->  "
+                f"{c.slave_region or c.slave_zone}:{c.slave_bc}  "
                 f"nFaces={c.n_faces}  method={c.method.value}"
             )
         lines.append("")

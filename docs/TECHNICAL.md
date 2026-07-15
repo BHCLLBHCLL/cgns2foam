@@ -253,58 +253,65 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 
 可调参数：`build_mesh(..., bc_overlap_tol=1e-4)`。
 
-### 3.6 耦合扫描与 CHT 脚手架（`--scan` / `--cht`）
+### 3.6 耦合扫描与 CHT（`--scan` / `--cht` / `--cht-direct`）
 
-实现：`src/couplings.py`、`src/cht_case.py`。
+实现：`src/regions_config.py`、`src/couplings.py`、`src/cht_case.py`、`src/cht_direct.py`。
+
+**区域定义（同名 JSON）**：
+
+`--cht` / `--cht-direct` 要求在 CGNS 旁放置 `<basename>.json`（如
+`mesh.cgns` → `mesh.json`）。**最简格式**与
+`tests/laptop_thermal_steady_scaled_v3_orig_BCs_fix.json` 一致：
+
+```json
+{
+  "fluid_regions": ["zone.fluid.a", "zone.fluid.b"],
+  "solid_regions": ["zone.solid.x", "zone.solid.y"]
+}
+```
+
+每个字符串匹配一个 CGNS zone；OpenFOAM 区域名为其 sanitized 形式（一对一）。
+解析容忍末尾多余逗号。仍兼容可选的 foam2thermal `regions` /
+`cellZones`（用于把多个 zone 合并进同一 OpenFOAM 区域）。
 
 **扫描（`--scan`）**：
 
 1. 读取 CGNS，构建各 zone 拓扑并应用 §3.5 BC 裁剪。
-2. 将每个 zone 分类为 **fluid** / **solid**（默认名含 `solid_region` →
-   solid；可用 `--solid-pattern` / `--fluid-pattern` 覆盖）。
+2. 若存在同名 JSON，按其中 `cellZones` 分类 fluid / solid 并命名区域；
+   否则回退启发式（`solid_region` → solid）及 `--solid-pattern` /
+   `--fluid-pattern`。
 3. 跨 zone 比较 FaceCenter BC 的几何面集合：同名 BC 有重叠，或名称不同但
    双方 ≥90% 面片重合 → 记为一对耦合界面。
-4. 按两侧区域类型标注：
-   - `fluid_fluid` → 方法 `cyclicAMI`（名称含 AMI/rotation）或 `mappedWall`
-   - `fluid_solid` / `solid_solid` → `mappedWall`
+4. 按两侧区域类型强制界面方法：
+   - `fluid_fluid` → **`cyclicAMI`**
+   - `fluid_solid` / `solid_solid` → **`mappedWall`**
+     （同一 OpenFOAM 区域内的固-固为 `stitch`）
 5. 控制台输出摘要；可选 `--report couplings.json`。
 
 **CHT 生成（`--cht`）**：
 
-在标准 mono-block polyMesh 之外追加：
+在标准 mono-block polyMesh 之外追加（`cellZones` 名改为 JSON 区域名，便于
+`splitMeshRegions -cellZonesOnly`）：
 
 | 路径 | 说明 |
 |------|------|
-| `system/regionProperties` | fluid / solid 区域列表 |
+| `system/regionProperties` | fluid / solid 区域列表（来自 JSON） |
 | `system/controlDict.cht` | `application chtMultiRegionSimpleFoam` |
-| `system/createPatchDict` | 若存在 AMI 对 |
+| `system/createPatchDict` | 同区域内 fluid–fluid AMI 对 |
 | `constant.orig/<region>/` | 物性 / turbulence |
 | `system.orig/<region>/` | fvSchemes / fvSolution |
 | `0.orig/<region>/` | T（及流体 U/p/p_rgh）占位 |
 | `Allrun.pre` | createPatch? + splitMeshRegions + restore0Dir |
 | `coupling_scan.json` / `setup_report.json` | 扫描结果 |
 
-物性与数值为默认空气 / 铝材 + 稳态 laminar 占位，需按工程改写。真正的
-区域划分依赖 OpenFOAM `splitMeshRegions -cellZonesOnly`（在 `Allrun.pre`
-中执行）。
-
 **一步直接多区域（`--cht-direct`）**：
 
-实现：`src/cht_direct.py`。每个 CGNS zone **直接**写成
-`constant/<region>/polyMesh`，耦合面改为
+按 JSON 区域合并写入 `constant/<region>/polyMesh`：
 
-```
-{local}_to_{remote}
-    type mappedWall;
-    sampleRegion {remote};
-    samplePatch  {remote}_to_{local};
-```
+* 同区域内 fluid–fluid 面 → `cyclicAMI`（`neighbourPatch`）
+* 跨区域耦合 → `mappedWall`（`sampleRegion` / `samplePatch`）
 
-跳过 mono 拼接与 `splitMeshRegions`。拓扑只构建一次（含 BC 裁剪），
-随后扫描耦合并按区域写出。`Allrun` 仅调用 `chtMultiRegionSimpleFoam`。
-
-适用：希望减少转换环节、降低 split 出错概率的场景。若仍需 mono 网格上
-`createPatch`/AMI baffles 再 split，继续用 `--cht`。
+跳过 mono 拼接与 `splitMeshRegions`。`Allrun` 仅调用求解器。
 
 ---
 

@@ -526,9 +526,19 @@ def _trim_cross_zone_bc_overlaps(
     return report
 
 
-def build_mesh(case: CGNSCase, *, default_exterior_name: str = "default_exterior",
-               bc_overlap_tol: float = 1e-4) -> Mesh:
-    """Convert a :class:`CGNSCase` into an OpenFOAM-ready :class:`Mesh`."""
+def build_mesh(
+    case: CGNSCase,
+    *,
+    default_exterior_name: str = "default_exterior",
+    bc_overlap_tol: float = 1e-4,
+    zone_cell_zone_map: dict[str, str] | None = None,
+) -> Mesh:
+    """Convert a :class:`CGNSCase` into an OpenFOAM-ready :class:`Mesh`.
+
+    *zone_cell_zone_map* optionally maps CGNS zone names to OpenFOAM
+    ``cellZone`` names (multiple zones may share one name for CHT region
+    merging via ``splitMeshRegions -cellZonesOnly``).
+    """
     if not case.zones:
         raise ValueError("CGNS case contains no zones")
 
@@ -613,9 +623,22 @@ def build_mesh(case: CGNSCase, *, default_exterior_name: str = "default_exterior
             used_patch_names.add(default_name)
             patches.append((default_name, "wall", remaining + f_cursor))
 
-        # cellZone covering all cells from this zone
+        # cellZone covering all cells from this zone (optionally merged by name)
         cz_labels = np.arange(cell_offsets[zi], cell_offsets[zi + 1], dtype=np.int64)
-        cell_zones.append(CellZone(name=_sanitize_patch_name(zone.name), cell_labels=cz_labels))
+        if zone_cell_zone_map and zone.name in zone_cell_zone_map:
+            cz_name = _sanitize_patch_name(zone_cell_zone_map[zone.name])
+        else:
+            cz_name = _sanitize_patch_name(zone.name)
+        merged = False
+        for existing in cell_zones:
+            if existing.name == cz_name:
+                existing.cell_labels = np.concatenate(
+                    [existing.cell_labels, cz_labels]
+                )
+                merged = True
+                break
+        if not merged:
+            cell_zones.append(CellZone(name=cz_name, cell_labels=cz_labels))
 
         fv_cursor += n_fv
         f_cursor += n_f

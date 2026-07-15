@@ -17,6 +17,7 @@ src/                   # 转换器实现（Python 包，导入名 `src`）
 ├── reader.py          # 基于 h5py 的 CGNS 读取（CPEX-0001 / SIDS-to-HDF5）
 ├── topology.py        # NGON / NFACE → OpenFOAM polyMesh 拓扑与重排
 ├── couplings.py       # 扫描流-流 / 流-固 / 固-固耦合界面对
+├── regions_config.py  # 同名 JSON 中的 fluid/solid 区域定义
 ├── cht_case.py        # chtMultiRegionSimpleFoam 脚手架（mono + split）
 ├── cht_direct.py      # 一步 CGNS -> 多区域 CHT
 ├── writer.py          # OpenFOAM polyMesh / system / constant / 0 文件生成
@@ -75,13 +76,44 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 
 ### 耦合扫描与 CHT 模式
 
+`--cht` / `--cht-direct` **必须**在 CGNS 旁提供同名 JSON（`mesh.cgns` → `mesh.json`），
+用 foam2thermal 风格的 `regions` 声明流体/固体区域及其 `cellZones`。
+
+界面方法（按区域类型强制）：
+
+| 耦合 | OpenFOAM 界面 |
+|------|----------------|
+| fluid–fluid | `cyclicAMI`（同 JSON 区域的多个 cellZone 会合并到同一 polyMesh） |
+| fluid–solid / solid–solid | `mappedWall` |
+
 | 开关 | 作用 |
 |------|------|
-| `--scan` | 读取 CGNS zone / BC，输出流-流、流-固、固-固耦合关系与界面对 |
-| `--cht` | mono polyMesh + CHT 脚手架；`Allrun.pre` 再跑 `splitMeshRegions` |
-| `--cht-direct` | **一步**写出 `constant/<region>/polyMesh` + 耦合 `mappedWall`，可直接 `./Allrun` |
+| `--scan` | 读取 CGNS zone / BC，输出流-流、流-固、固-固耦合关系与界面对（有同名 JSON 则用其区域定义） |
+| `--cht` | mono polyMesh + CHT 脚手架；`cellZones` 按 JSON 区域名合并；`Allrun.pre` 跑 `splitMeshRegions` |
+| `--cht-direct` | **一步**写出 `constant/<region>/polyMesh`（JSON 区域合并）；流-流 `cyclicAMI`，流-固/固-固 `mappedWall` |
 | `--report PATH` | 将扫描结果写为 JSON |
-| `--solid-pattern` / `--fluid-pattern` | 覆盖固体 / 流体 zone 命名规则（可重复） |
+| `--solid-pattern` / `--fluid-pattern` | 无 JSON 时覆盖固体 / 流体 zone 命名规则（可重复） |
+
+同名 JSON 最简格式（参考
+`tests/laptop_thermal_steady_scaled_v3_orig_BCs_fix.json`）：
+
+```json
+{
+  "fluid_regions": [
+    "laptop_3d_geom.air.air_domain",
+    "FPHPARTS.rotation1",
+    "FPHPARTS.rotation2"
+  ],
+  "solid_regions": [
+    "laptop_3d_geom.fan1.case1",
+    "solid_region.Cu_block",
+    "solid_region.Cover"
+  ]
+}
+```
+
+每个字符串对应一个 CGNS zone；OpenFOAM 区域名取 sanitized zone 名（一对一）。
+也可使用可选的 foam2thermal 风格 `regions` + `cellZones`（多 zone 合并同一区域）。
 
 ```bash
 # --cht（两阶段）

@@ -73,16 +73,17 @@ examples:
         action="store_true",
         help=(
             "Mono polyMesh + chtMultiRegionSimpleFoam scaffolding "
-            "(Allrun.pre runs splitMeshRegions). Implies a coupling scan."
+            "(Allrun.pre runs splitMeshRegions). Requires sidecar "
+            "<cgns>.json listing fluid/solid regions. Implies a coupling scan."
         ),
     )
     p.add_argument(
         "--cht-direct",
         action="store_true",
         help=(
-            "One-step CGNS -> multi-region chtMultiRegionSimpleFoam case: "
-            "each zone becomes constant/<region>/polyMesh with mappedWall "
-            "couplings. No mono mesh and no splitMeshRegions."
+            "One-step CGNS -> multi-region chtMultiRegionSimpleFoam case. "
+            "Requires sidecar <cgns>.json: regions are merged from cellZones; "
+            "fluid-fluid -> cyclicAMI, fluid-solid/solid-solid -> mappedWall."
         ),
     )
     p.add_argument(
