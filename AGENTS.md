@@ -2,13 +2,30 @@
 
 ## Project Overview
 
-**cgns2foam** — A Python project to convert CGNS (CFD General Notation System) mesh files to OpenFOAM project format.
+**cgns2foam** — Pure-Python converter (h5py + numpy) from CGNS/HDF5 meshes
+to OpenFOAM v2412 case directories. Supports ANSA-compatible binary polyMesh
+headers, cross-zone BC overlap trimming, coupling scan (`--scan`), and
+`chtMultiRegionSimpleFoam` scaffolding (`--cht`).
 
-The repository is in an early stage. It currently contains only test data (CGNS/HDF5 mesh files under `cases/`) stored via Git LFS, and no application source code yet.
+## Cursor Cloud / agent instructions
 
-## Cursor Cloud specific instructions
-
-- **Git LFS**: All files under `cases/` are tracked by Git LFS. After cloning or pulling, run `git lfs pull` to fetch the actual binary data (CGNS files are ~66 MB each). Without this, the files will be LFS pointer stubs.
-- **Python + h5py**: The CGNS files are HDF5 format. Use `h5py` to read and inspect them (`pip install h5py`). The update script handles this dependency.
-- **No application code yet**: There is no script, build system, test suite, or linter configured. As code is added, update this file with run/test/lint instructions.
-- **Test data**: Three test cases are available under `cases/`: `box_ansa`, `laptop_simplified`, and `tr03`. Each contains a `.cgns` mesh file and a `.zip` archive.
+- **Git LFS**: Files under `cases/` may be LFS-tracked. Run `git lfs pull`
+  after clone if binaries are pointer stubs.
+- **Python deps**: `pip install -r requirements.txt` (`h5py`, `numpy`).
+- **Run converter** (repo root):
+  ```bash
+  python -m src path/to/case.cgns [out_dir]
+  python -m src --scan path/to/case.cgns --report couplings.json
+  python -m src --cht path/to/case.cgns out_cht
+  ```
+- **Tests**:
+  ```bash
+  python -m unittest tests.test_box tests.test_bc_overlap tests.test_couplings -v
+  ```
+  Note: `.gitignore` has `tests/*`; new test modules may need
+  `git add -f tests/test_*.py`.
+- **Test data**: Prefer `tests/*.cgns` when present (e.g.
+  `laptop_thermal_steady_scaled_v3_orig_fix.cgns`). `cases/` archives are
+  large LFS objects.
+- **Docs**: Algorithm and CHT scan details in `docs/TECHNICAL.md`
+  (§3.5 BC trim, §3.6 couplings / CHT).

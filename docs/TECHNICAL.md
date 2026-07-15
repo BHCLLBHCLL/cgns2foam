@@ -253,6 +253,41 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 
 可调参数：`build_mesh(..., bc_overlap_tol=1e-4)`。
 
+### 3.6 耦合扫描与 CHT 脚手架（`--scan` / `--cht`）
+
+实现：`src/couplings.py`、`src/cht_case.py`。
+
+**扫描（`--scan`）**：
+
+1. 读取 CGNS，构建各 zone 拓扑并应用 §3.5 BC 裁剪。
+2. 将每个 zone 分类为 **fluid** / **solid**（默认名含 `solid_region` →
+   solid；可用 `--solid-pattern` / `--fluid-pattern` 覆盖）。
+3. 跨 zone 比较 FaceCenter BC 的几何面集合：同名 BC 有重叠，或名称不同但
+   双方 ≥90% 面片重合 → 记为一对耦合界面。
+4. 按两侧区域类型标注：
+   - `fluid_fluid` → 方法 `cyclicAMI`（名称含 AMI/rotation）或 `mappedWall`
+   - `fluid_solid` / `solid_solid` → `mappedWall`
+5. 控制台输出摘要；可选 `--report couplings.json`。
+
+**CHT 生成（`--cht`）**：
+
+在标准 mono-block polyMesh 之外追加：
+
+| 路径 | 说明 |
+|------|------|
+| `system/regionProperties` | fluid / solid 区域列表 |
+| `system/controlDict.cht` | `application chtMultiRegionSimpleFoam` |
+| `system/createPatchDict` | 若存在 AMI 对 |
+| `constant.orig/<region>/` | 物性 / turbulence |
+| `system.orig/<region>/` | fvSchemes / fvSolution |
+| `0.orig/<region>/` | T（及流体 U/p/p_rgh）占位 |
+| `Allrun.pre` | createPatch? + splitMeshRegions + restore0Dir |
+| `coupling_scan.json` / `setup_report.json` | 扫描结果 |
+
+物性与数值为默认空气 / 铝材 + 稳态 laminar 占位，需按工程改写。真正的
+区域划分依赖 OpenFOAM `splitMeshRegions -cellZonesOnly`（在 `Allrun.pre`
+中执行）。
+
 ---
 
 ## 4. 生成的 OpenFOAM 文件汇总
@@ -365,24 +400,21 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 # 在仓库根目录下运行，确保 `src` 包能被 import
 python3 -m src <in.cgns> [out_dir] [-q|--quiet]
 python3 -m src --openfoam-native <in.cgns> [out_dir]   # 非 ANSA 头
+python3 -m src --scan <in.cgns> [--report couplings.json]
+python3 -m src --cht <in.cgns> [out_dir]               # polyMesh + CHT 脚手架
 python3 tests/run_all.py [--with-checkmesh] [--out-root /tmp/out]
-python3 -m unittest tests.test_box tests.test_bc_overlap -v
+python3 -m unittest tests.test_box tests.test_bc_overlap tests.test_couplings -v
 ```
 
 ```python
-from src import read_cgns, convert_file, WriteOptions
+from src import read_cgns, convert_file, scan_file, WriteOptions
 
-case = read_cgns("in.cgns")          # 仅读取，得到 CGNSCase
-mesh = convert_file("in.cgns", "out")  # 默认 WriteOptions()，含 BC 裁剪
+case = read_cgns("in.cgns")
+report = scan_file("in.cgns", report_path="couplings.json")
+mesh = convert_file("in.cgns", "out")           # 默认 WriteOptions()
+mesh = convert_file("in.cgns", "cht_out", cht=True)
 mesh = convert_file(
     "in.cgns", "out",
     write_options=WriteOptions.openfoam_native(),
 )
-# mesh.points / mesh.face_offsets / mesh.face_vertices /
-# mesh.owner / mesh.neighbour / mesh.n_internal_faces /
-# mesh.n_cells / mesh.patches / mesh.cell_zones
 ```
-
-`build_mesh` 另接受 `bc_overlap_tol`（默认 `1e-4`），目前仅能通过
-`read_cgns` + `build_mesh` + `write_case` 流水线手动传入；常规用户走
-`convert_file` 即可。

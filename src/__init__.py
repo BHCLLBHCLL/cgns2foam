@@ -11,9 +11,17 @@ The Python package lives in the ``src/`` directory; import paths are
 Public entry point: :func:`src.convert.convert_file`.
 """
 
-from .convert import convert_file  # noqa: F401
+from .convert import convert_file, scan_file  # noqa: F401
 from .reader import read_cgns      # noqa: F401
 from .writer import WriteOptions   # noqa: F401
+from .couplings import scan_couplings, format_coupling_summary  # noqa: F401
 
-__all__ = ["convert_file", "read_cgns", "WriteOptions"]
-__version__ = "0.1.0"
+__all__ = [
+    "convert_file",
+    "scan_file",
+    "read_cgns",
+    "WriteOptions",
+    "scan_couplings",
+    "format_coupling_summary",
+]
+__version__ = "0.2.0"
