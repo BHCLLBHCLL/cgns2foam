@@ -48,7 +48,7 @@ from .couplings import (
     scan_couplings,
 )
 from .reader import CGNSCase, read_cgns
-from .regions_config import RegionsConfig, load_sidecar_regions
+from .regions_config import MERGED_FLUID_REGION, RegionsConfig, load_sidecar_regions
 from .topology import (
     CellZone,
     Mesh,
@@ -60,21 +60,36 @@ from .topology import (
 from .writer import WriteOptions, write_poly_mesh
 
 
-def coupling_patch_name(local: str, remote: str) -> str:
-    """mappedWall inter-region patch name."""
-    return f"{local}_to_{remote}"
+def zone_name_stem(zone_name: str) -> str:
+    """Last ``.``-separated token of a CGNS zone / cellZone name (OF-safe).
+
+    Examples: ``solid_region.Cu_block`` → ``Cu_block``,
+    ``laptop_3d_geom.solid_region.CPU`` → ``CPU``.
+    """
+    tail = zone_name.rsplit(".", 1)[-1]
+    return _sanitize_patch_name(tail)
+
+
+def coupling_stem(zone_name: str, foam_name: str) -> str:
+    """Short label for coupling patch pairing.
+
+    Merged fluid region always uses ``air``; solids use :func:`zone_name_stem`.
+    """
+    if foam_name == MERGED_FLUID_REGION or foam_name == "air":
+        return "air"
+    return zone_name_stem(zone_name)
+
+
+def coupling_patch_name(local_stem: str, remote_stem: str) -> str:
+    """mappedWall inter-region patch name, e.g. ``CPU_to_Cover``."""
+    return f"{local_stem}_to_{remote_stem}"
 
 
 def ami_patch_name(local_zone: str, remote_zone: str) -> str:
-    """cyclicAMI patch name (no ``_to_`` so field stubs treat it as AMI)."""
-    a = _sanitize_patch_name(local_zone).replace(".", "_")
-    b = _sanitize_patch_name(remote_zone).replace(".", "_")
-    # shorten to last path-like token if very long
-    if len(a) > 40:
-        a = a.split("_")[-1] or a[-40:]
-    if len(b) > 40:
-        b = b.split("_")[-1] or b[-40:]
-    return f"ami_{a}__{b}"
+    """cyclicAMI patch name from zone stems (no ``_to_``; field stubs use ami_)."""
+    a = zone_name_stem(local_zone)
+    b = zone_name_stem(remote_zone)
+    return f"ami_{a}_{b}"
 
 
 def _region_patch_plan(
@@ -90,6 +105,8 @@ def _region_patch_plan(
     """Build patch plan for a (possibly multi-zone) OpenFOAM region.
 
     Face ids are in the merged face index space (global within the region).
+    Coupling patches use short stems (``CPU_to_Cover``); ``sampleRegion``
+    still points at the full OpenFOAM region directory name.
     """
     zones_in = {case.zones[i].name for i in zone_indices}
     foam_by_zone = {r.zone_name: r.foam_name for r in report.regions}
@@ -174,27 +191,20 @@ def _region_patch_plan(
         if ids.size == 0:
             continue
 
-        # fluid–fluid across distinct OpenFOAM regions: cyclicAMI needs one
-        # polyMesh. Emit mappedWall and rely on JSON merging coupled fluids
-        # into one region when true AMI flow coupling is required.
-        if c.method == CouplingMethod.CYCLIC_AMI:
-            pname = coupling_patch_name(foam_name, remote)
-            foam_type = "mappedWall"
-            extras = {
-                "sample_mode": "nearestPatchFace",
-                "sample_region": remote,
-                "sample_patch": coupling_patch_name(remote, foam_name),
-            }
-        elif c.method == CouplingMethod.MAPPED_WALL:
-            pname = coupling_patch_name(foam_name, remote)
-            foam_type = "mappedWall"
-            extras = {
-                "sample_mode": "nearestPatchFace",
-                "sample_region": remote,
-                "sample_patch": coupling_patch_name(remote, foam_name),
-            }
-        else:
+        if c.method not in (
+            CouplingMethod.CYCLIC_AMI,
+            CouplingMethod.MAPPED_WALL,
+        ):
             continue
+
+        local_stem = coupling_stem(local_zone, foam_name)
+        remote_stem = coupling_stem(remote_zone, remote)
+        pname = coupling_patch_name(local_stem, remote_stem)
+        extras = {
+            "sample_mode": "nearestPatchFace",
+            "sample_region": remote,
+            "sample_patch": coupling_patch_name(remote_stem, local_stem),
+        }
 
         if pname in used:
             for i, entry in enumerate(patches):
@@ -209,7 +219,7 @@ def _region_patch_plan(
                     break
             continue
         used.add(pname)
-        patches.append((pname, foam_type, global_ids(zi, ids), extras))
+        patches.append((pname, "mappedWall", global_ids(zi, ids), extras))
         assigned[zi][ids] = True
 
     # --- Remaining CGNS BCs ---
@@ -550,8 +560,8 @@ def convert_cht_direct(
         if cross_ff:
             print(
                 "[cgns2foam] warning: "
-                f"{len(cross_ff)} fluid–fluid pair(s) span different OpenFOAM "
-                "regions; cyclicAMI needs one polyMesh — merge those cellZones "
+                f"{len(cross_ff)} fluid-fluid pair(s) span different OpenFOAM "
+                "regions; cyclicAMI needs one polyMesh - put those cellZones "
                 "under one fluid region in the sidecar JSON."
             )
 

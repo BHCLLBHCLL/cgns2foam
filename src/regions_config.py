@@ -18,12 +18,13 @@ Expected path: ``<same-basename-as-cgns>.json`` (e.g. ``foo.cgns`` → ``foo.jso
     }
 
 Each entry is a CGNS zone name (matched flexibly). **All fluid zones are
-merged into one OpenFOAM region named ``fluid``**
-(``constant/fluid/polyMesh``). Each solid zone stays its own region
+placed into one OpenFOAM region named ``air``**
+(``constant/air/polyMesh``) — zones are concatenated into that directory,
+not renamed to a new ``fluid`` region. Each solid zone stays its own region
 (sanitized zone name).
 
 Optional foam2thermal-style ``regions`` with ``name`` / ``type`` / ``cellZones``
-is still accepted; fluids are likewise coalesced into ``fluid``.
+is still accepted; fluids are likewise coalesced into ``air``.
 """
 
 from __future__ import annotations
@@ -140,8 +141,8 @@ def _loads_json_relaxed(text: str) -> Any:
         return json.loads(cleaned)
 
 
-# OpenFOAM directory / regionProperties name for the merged fluid polyMesh.
-MERGED_FLUID_REGION = "fluid"
+# OpenFOAM directory / regionProperties name for all fluid zones' polyMesh.
+MERGED_FLUID_REGION = "air"
 
 
 def _dedupe_preserve(items: list[str]) -> list[str]:
@@ -156,7 +157,7 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
 
 
 def _merge_fluid_specs(specs: list[RegionSpec]) -> list[RegionSpec]:
-    """Collapse every fluid RegionSpec into one region named ``fluid``."""
+    """Collapse every fluid RegionSpec into one region named ``air``."""
     fluid_zones: list[str] = []
     solids: list[RegionSpec] = []
     for s in specs:
@@ -267,7 +268,7 @@ def _parse_specs(data: dict[str, Any]) -> list[RegionSpec]:
         specs = _specs_from_regions_list(data)
     if not specs:
         specs = _specs_from_regions_dict(data)
-    # Always coalesce fluids into constant/fluid/polyMesh.
+    # Always coalesce fluids into constant/air/polyMesh.
     return _merge_fluid_specs(specs)
 
 

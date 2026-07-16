@@ -112,9 +112,9 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 }
 ```
 
-每个字符串对应一个 CGNS zone。**所有 `fluid_regions` 合并为单一区域
-`fluid`**（`constant/fluid/polyMesh`，域内流-流界面为 `cyclicAMI`）；
-每个固体 zone 各自一个区域（sanitized 名）。
+每个字符串对应一个 CGNS zone。**所有 `fluid_regions` 放入单一区域
+`air`**（`constant/air/polyMesh`，域内流-流界面为 `cyclicAMI`）；
+每个固体 zone 各自一个区域（sanitized 名）。不另建名为 `fluid` 的区域。
 
 ```bash
 # --cht（两阶段）

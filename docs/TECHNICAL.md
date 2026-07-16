@@ -270,9 +270,9 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 }
 ```
 
-每个字符串匹配一个 CGNS zone。**全部流体 zone 合并为 OpenFOAM 区域
-`fluid`**（写出 `constant/fluid/polyMesh`；同区域内流-流 → `cyclicAMI`）。
-固体 zone 仍一对一（sanitized 名）。解析容忍末尾多余逗号。
+每个字符串匹配一个 CGNS zone。**全部流体 zone 放入 OpenFOAM 区域
+`air`**（写出 `constant/air/polyMesh`；同区域内流-流 → `cyclicAMI`）。
+不另建 `fluid` 区域。固体 zone 仍一对一（sanitized 名）。解析容忍末尾多余逗号。
 
 **扫描（`--scan`）**：
 

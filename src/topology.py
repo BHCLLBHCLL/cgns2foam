@@ -367,14 +367,19 @@ def _unique_patch_name(base: str, used: set[str]) -> str:
 
 
 def _sanitize_patch_name(name: str) -> str:
-    """Make a patch name compatible with OpenFOAM dictionary keys."""
+    """Make a name compatible with OpenFOAM ``word`` (no '.' etc.)."""
     out: list[str] = []
     for ch in name:
-        if ch.isalnum() or ch in "_.":
+        if ch.isalnum() or ch == "_":
             out.append(ch)
         else:
+            # '.' and other punctuation → '_' (OpenFOAM word forbids '.')
             out.append("_")
     result = "".join(out) or "patch"
+    # collapse repeated underscores from multi-char replacements
+    while "__" in result:
+        result = result.replace("__", "_")
+    result = result.strip("_") or "patch"
     if result[0].isdigit():
         result = "p_" + result
     return result

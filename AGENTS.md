@@ -18,7 +18,8 @@ headers, cross-zone BC overlap trimming, coupling scan (`--scan`), and
   ```json
   {"fluid_regions": ["zone.a", "..."], "solid_regions": ["zone.b", "..."]}
   ```
-  All fluid zones merge into one region `fluid` (`constant/fluid/polyMesh`).
+  All fluid zones go into one region `air` (`constant/air/polyMesh`),
+  not a separate `fluid` region.
   Fluid–fluid → `cyclicAMI`; fluid–solid / solid–solid → `mappedWall`.
 - **Run converter** (repo root):
   ```bash

@@ -388,16 +388,16 @@ def format_coupling_summary(report: CouplingReport) -> str:
         lines.append(f"regions_json: {report.regions_json}")
     lines.extend(
         [
-            f"regions: {len(report.regions)} CGNS zones → "
+            f"regions: {len(report.regions)} CGNS zones -> "
             f"OpenFOAM fluid={len(report.fluid_regions)}, "
             f"solid={len(report.solid_regions)}",
             "",
-            "=== Regions (CGNS zone → OpenFOAM) ===",
+            "=== Regions (CGNS zone -> OpenFOAM) ===",
         ]
     )
     for r in report.regions:
         lines.append(
-            f"  [{r.region_type:5}] {r.zone_name}  →  {r.foam_name}  "
+            f"  [{r.region_type:5}] {r.zone_name}  ->  {r.foam_name}  "
             f"cells={r.n_cells}  bcs={len(r.bc_names)}"
         )
     lines.append("")
