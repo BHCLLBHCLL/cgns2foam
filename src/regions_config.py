@@ -25,13 +25,27 @@ not renamed to a new ``fluid`` region. Each solid zone stays its own region
 
 Optional foam2thermal-style ``regions`` with ``name`` / ``type`` / ``cellZones``
 is still accepted; fluids are likewise coalesced into ``air``.
+
+Optional MRF (written to ``constant/air/MRFProperties``)::
+
+    "mrf_regions": [
+      {
+        "cellZone": "FPHPARTS.rotation1",
+        "origin": [-0.0678, -0.003, 0.081],
+        "axis": [0.0, 1.0, 0.0],
+        "omega": 100
+      }
+    ]
+
+``origin`` may be ``"centroid"`` (zone vertex mean). foam2thermal nested
+``regions[].mrf`` is also accepted.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,11 +60,32 @@ class RegionSpec:
 
 
 @dataclass
+class MrfRegionSpec:
+    """One rotating cellZone entry for OpenFOAM MRFProperties."""
+
+    cell_zone: str  # matched CGNS zone name
+    foam_cell_zone: str  # sanitized name used in polyMesh/cellZones
+    omega: float
+    axis: tuple[float, float, float]
+    #: Explicit origin, or None → compute zone centroid at write time
+    origin: tuple[float, float, float] | None = None
+    non_rotating_patches: list[str] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["axis"] = list(self.axis)
+        if self.origin is not None:
+            d["origin"] = list(self.origin)
+        return d
+
+
+@dataclass
 class RegionsConfig:
     path: Path
     specs: list[RegionSpec]
     #: CGNS zone name → (OpenFOAM region name, fluid|solid)
     zone_map: dict[str, tuple[str, str]]
+    mrf_regions: list[MrfRegionSpec] = field(default_factory=list)
 
     def foam_name_for(self, zone_name: str) -> str | None:
         hit = self.zone_map.get(zone_name)
@@ -272,6 +307,113 @@ def _parse_specs(data: dict[str, Any]) -> list[RegionSpec]:
     return _merge_fluid_specs(specs)
 
 
+def _as_vec3(value: Any, *, label: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{label} must be a length-3 list, got {value!r}")
+    return (float(value[0]), float(value[1]), float(value[2]))
+
+
+def _default_mrf_axis(zone_name: str) -> tuple[float, float, float]:
+    name = zone_name.lower()
+    if "rotation1" in name:
+        return (0.0, 1.0, 0.0)
+    if "rotation2" in name:
+        return (0.0, -1.0, 0.0)
+    return (0.0, 0.0, 1.0)
+
+
+def _parse_mrf_regions(
+    data: dict[str, Any],
+    zone_names: list[str],
+) -> list[MrfRegionSpec]:
+    """Parse ``mrf_regions`` and/or foam2thermal ``regions[].mrf``."""
+    out: list[MrfRegionSpec] = []
+    seen_cz: set[str] = set()
+
+    def _add(
+        cz_raw: str,
+        *,
+        omega: float,
+        axis: Any,
+        origin: Any,
+        non_rotating: list[str] | None,
+    ) -> None:
+        hit = match_cell_zone_to_cgns(str(cz_raw), zone_names)
+        if hit is None:
+            raise ValueError(f"MRF cellZone {cz_raw!r} not found in CGNS zones")
+        if hit in seen_cz:
+            return
+        seen_cz.add(hit)
+        if axis is None:
+            ax = _default_mrf_axis(hit)
+        else:
+            ax = _as_vec3(axis, label=f"mrf axis for {cz_raw}")
+        org: tuple[float, float, float] | None
+        if origin is None or origin == "centroid":
+            org = None
+        else:
+            org = _as_vec3(origin, label=f"mrf origin for {cz_raw}")
+        out.append(
+            MrfRegionSpec(
+                cell_zone=hit,
+                foam_cell_zone=_sanitize_patch_name(hit),
+                omega=float(omega),
+                axis=ax,
+                origin=org,
+                non_rotating_patches=list(non_rotating) if non_rotating else None,
+            )
+        )
+
+    for item in data.get("mrf_regions") or []:
+        if not isinstance(item, dict):
+            continue
+        cz = item.get("cellZone") or item.get("cell_zone") or item.get("zone")
+        if not cz:
+            continue
+        _add(
+            str(cz),
+            omega=float(item.get("omega", 100)),
+            axis=item.get("axis"),
+            origin=item.get("origin", "centroid"),
+            non_rotating=item.get("nonRotatingPatches")
+            or item.get("non_rotating_patches"),
+        )
+
+    # foam2thermal: regions[].mrf { cellZones, omega, origin, axis/axes }
+    for reg in data.get("regions") or []:
+        if not isinstance(reg, dict):
+            continue
+        mrf = reg.get("mrf")
+        if not isinstance(mrf, dict):
+            continue
+        zones = mrf.get("cellZones") or mrf.get("cell_zones") or []
+        if isinstance(zones, str):
+            zones = [zones]
+        omega = float(mrf.get("omega", 100))
+        origin = mrf.get("origin", "centroid")
+        axes_cfg = mrf.get("axes")
+        default_axis = mrf.get("axis")
+        nr = mrf.get("nonRotatingPatches") or mrf.get("non_rotating_patches")
+        for i, cz in enumerate(zones):
+            axis = default_axis
+            if isinstance(axes_cfg, dict):
+                axis = axes_cfg.get(cz, axis)
+            elif isinstance(axes_cfg, list) and i < len(axes_cfg):
+                axis = axes_cfg[i]
+            org = origin
+            if isinstance(origin, list) and origin and isinstance(origin[0], (list, tuple)):
+                org = origin[i] if i < len(origin) else origin[0]
+            _add(
+                str(cz),
+                omega=omega,
+                axis=axis,
+                origin=org,
+                non_rotating=nr if isinstance(nr, list) else None,
+            )
+
+    return out
+
+
 def load_regions_config(
     path: str | Path,
     zone_names: list[str],
@@ -312,7 +454,13 @@ def load_regions_config(
             f"zones={zone_names!r}, unmatched={unmatched!r}"
         )
 
-    return RegionsConfig(path=p, specs=specs, zone_map=zone_map)
+    mrf_regions = _parse_mrf_regions(data, zone_names)
+    return RegionsConfig(
+        path=p,
+        specs=specs,
+        zone_map=zone_map,
+        mrf_regions=mrf_regions,
+    )
 
 
 def load_sidecar_regions(

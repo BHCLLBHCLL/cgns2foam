@@ -274,6 +274,12 @@ zone 之前就地修改各 zone 的 `bc_face_lists`）。
 `air`**（写出 `constant/air/polyMesh`；同区域内流-流 → `cyclicAMI`）。
 不另建 `fluid` 区域。固体 zone 仍一对一（sanitized 名）。解析容忍末尾多余逗号。
 
+可选 **`mrf_regions`**：每项含 `cellZone` / `origin` / `axis` / `omega`。
+`--cht-direct` 时写入 `constant/air/MRFProperties`（`cellZone` 为
+sanitized 名，与 polyMesh `cellZones` 一致）；`nonRotatingPatches` 默认含
+AMI、`open*`、`*_to_*`；名称含 `impeller` 的 patch 在 `0/air/U` 中设为
+`movingWallVelocity`。
+
 **扫描（`--scan`）**：
 
 1. 读取 CGNS，构建各 zone 拓扑并应用 §3.5 BC 裁剪。

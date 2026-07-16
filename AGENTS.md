@@ -21,6 +21,8 @@ headers, cross-zone BC overlap trimming, coupling scan (`--scan`), and
   All fluid zones go into one region `air` (`constant/air/polyMesh`),
   not a separate `fluid` region.
   Fluid–fluid → `cyclicAMI`; fluid–solid / solid–solid → `mappedWall`.
+  Optional `mrf_regions` in the JSON → `constant/air/MRFProperties`
+  (+ impeller `movingWallVelocity` in `0/air/U`).
 - **Run converter** (repo root):
   ```bash
   python -m src path/to/case.cgns [out_dir]

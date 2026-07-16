@@ -39,6 +39,8 @@ from .cht_case import (
     _thermophysical_solid,
     _turbulence_laminar,
     _write_text,
+    mrf_non_rotating_patches,
+    mrf_properties,
 )
 from .couplings import (
     CouplingMethod,
@@ -48,7 +50,12 @@ from .couplings import (
     scan_couplings,
 )
 from .reader import CGNSCase, read_cgns
-from .regions_config import MERGED_FLUID_REGION, RegionsConfig, load_sidecar_regions
+from .regions_config import (
+    MERGED_FLUID_REGION,
+    MrfRegionSpec,
+    RegionsConfig,
+    load_sidecar_regions,
+)
 from .topology import (
     CellZone,
     Mesh,
@@ -58,6 +65,41 @@ from .topology import (
     _sanitize_patch_name,
 )
 from .writer import WriteOptions, write_poly_mesh
+
+
+def _zone_vertex_centroid(zone) -> tuple[float, float, float]:
+    c = zone.coords.mean(axis=0)
+    return (float(c[0]), float(c[1]), float(c[2]))
+
+
+def resolve_mrf_entries(
+    mrf_specs: list[MrfRegionSpec],
+    case: CGNSCase,
+    patch_names: list[str],
+) -> list[dict[str, Any]]:
+    """Turn JSON MRF specs into MRFProperties entry dicts."""
+    zone_by_name = {z.name: z for z in case.zones}
+    default_nr = mrf_non_rotating_patches(patch_names)
+    entries: list[dict[str, Any]] = []
+    for i, spec in enumerate(mrf_specs):
+        zone = zone_by_name.get(spec.cell_zone)
+        if zone is None:
+            raise ValueError(f"MRF cellZone {spec.cell_zone!r} missing from CGNS case")
+        origin = spec.origin if spec.origin is not None else _zone_vertex_centroid(zone)
+        nr = spec.non_rotating_patches if spec.non_rotating_patches is not None else default_nr
+        entries.append(
+            {
+                "name": f"MRF{i + 1}" if len(mrf_specs) > 1 else "MRF",
+                "cellZone": spec.foam_cell_zone,
+                "origin": origin,
+                "axis": list(spec.axis),
+                "omega": spec.omega,
+                "nonRotatingPatches": nr,
+                "cgnsZone": spec.cell_zone,
+            }
+        )
+    return entries
+
 
 
 def zone_name_stem(zone_name: str) -> str:
@@ -410,6 +452,7 @@ def write_cht_direct_case(
     zone_topos: list[_ZoneTopo],
     *,
     source_path: str,
+    regions_config: RegionsConfig | None = None,
     end_time: int = 500,
     write_interval: int = 50,
     gravity: list[float] | None = None,
@@ -426,6 +469,9 @@ def write_cht_direct_case(
     region_type = {}
     for r in report.regions:
         region_type[r.foam_name] = r.region_type
+
+    mrf_specs = list(regions_config.mrf_regions) if regions_config else []
+    mrf_summary: list[dict[str, Any]] = []
 
     _write_text(out / "constant" / "regionProperties", _region_properties(fluid, solid))
     _write_text(out / "constant" / "g", _gravity(gravity))
@@ -461,10 +507,29 @@ def write_cht_direct_case(
         if rtype == "fluid":
             _write_text(cdir / "thermophysicalProperties", _thermophysical_fluid())
             _write_text(cdir / "turbulenceProperties", _turbulence_laminar())
+            if mrf_specs and foam_name == MERGED_FLUID_REGION:
+                mrf_entries = resolve_mrf_entries(mrf_specs, case, patch_names)
+                _write_text(
+                    cdir / "MRFProperties",
+                    mrf_properties(
+                        mrf_entries,
+                        location=f"constant/{foam_name}",
+                    ),
+                )
+                mrf_summary = mrf_entries
             _write_text(sdir / "fvSchemes", _fv_schemes_fluid())
             _write_text(sdir / "fvSolution", _fv_solution_fluid())
             _write_text(zdir / "T", _field_T("fluid", patch_names, patch_types=patch_types))
-            _write_text(zdir / "U", _field_U(patch_names, patch_types=patch_types))
+            _write_text(
+                zdir / "U",
+                _field_U(
+                    patch_names,
+                    patch_types=patch_types,
+                    moving_wall_patches=[
+                        p for p in patch_names if "impeller" in p.lower()
+                    ] if mrf_specs else None,
+                ),
+            )
             _write_text(zdir / "p", _field_p(patch_names, patch_types=patch_types))
             _write_text(zdir / "p_rgh", _field_p_rgh(patch_names, patch_types=patch_types))
         else:
@@ -477,6 +542,8 @@ def write_cht_direct_case(
     summary = report.to_dict()
     summary["mode"] = "cht-direct"
     summary["solver"] = "chtMultiRegionSimpleFoam"
+    if mrf_summary:
+        summary["mrf"] = mrf_summary
     summary["regions_written"] = {
         name: {
             "n_cells": mesh.n_cells,
@@ -565,6 +632,18 @@ def convert_cht_direct(
                 "under one fluid region in the sidecar JSON."
             )
 
+    if verbose and regions_config is not None and regions_config.mrf_regions:
+        print(
+            f"[cgns2foam] MRF: {len(regions_config.mrf_regions)} rotating "
+            f"cellZone(s) -> constant/air/MRFProperties"
+        )
+        for m in regions_config.mrf_regions:
+            org = "centroid" if m.origin is None else list(m.origin)
+            print(
+                f"            - {m.foam_cell_zone}  omega={m.omega}  "
+                f"axis={list(m.axis)}  origin={org}"
+            )
+
     t2 = time.perf_counter()
     summary = write_cht_direct_case(
         out_dir,
@@ -572,13 +651,15 @@ def convert_cht_direct(
         report,
         zone_topos,
         source_path=os.path.abspath(cgns_path),
+        regions_config=regions_config,
     )
     if verbose:
         print(
             f"[cgns2foam] cht-direct case written to {out_dir} "
             f"({len(summary.get('fluid_regions', []))} fluid, "
             f"{len(summary.get('solid_regions', []))} solid, "
-            f"{summary.get('n_couplings', 0)} couplings) "
+            f"{summary.get('n_couplings', 0)} couplings"
+            f"{', mrf=' + str(len(summary.get('mrf', []))) if summary.get('mrf') else ''}) "
             f"[{time.perf_counter() - t2:.2f}s write, "
             f"{time.perf_counter() - t0:.2f}s total]"
         )

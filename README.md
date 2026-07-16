@@ -116,6 +116,27 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 `air`**（`constant/air/polyMesh`，域内流-流界面为 `cyclicAMI`）；
 每个固体 zone 各自一个区域（sanitized 名）。不另建名为 `fluid` 的区域。
 
+可选 MRF（写出 `constant/air/MRFProperties`，叶轮 patch 用 `movingWallVelocity`）：
+
+```json
+"mrf_regions": [
+  {
+    "cellZone": "FPHPARTS.rotation1",
+    "origin": [-0.0678, -0.003, 0.081],
+    "axis": [0.0, 1.0, 0.0],
+    "omega": 100
+  },
+  {
+    "cellZone": "FPHPARTS.rotation2",
+    "origin": [0.0802, -0.003, 0.081],
+    "axis": [0.0, -1.0, 0.0],
+    "omega": 100
+  }
+]
+```
+
+`origin` 也可为 `"centroid"`（用该 zone 顶点坐标均值）。
+
 ```bash
 # --cht（两阶段）
 cd /tmp/myChtCase && ./Allrun.pre && ./Allrun

@@ -349,6 +349,70 @@ value           ({gx} {gy} {gz});
     )
 
 
+def mrf_non_rotating_patches(patch_names: list[str]) -> list[str]:
+    """Patches that stay in the inertial frame under MRF."""
+    out: list[str] = []
+    for p in patch_names:
+        low = p.lower()
+        if low.startswith("ami_") or ("ami" in low and "_to_" not in low):
+            out.append(p)
+        elif p == "open" or p.startswith("open"):
+            out.append(p)
+        elif "_to_" in p:
+            out.append(p)
+    return sorted(set(out))
+
+
+def mrf_properties(
+    entries: list[dict[str, Any]],
+    *,
+    non_rotating: list[str] | None = None,
+    location: str = "constant",
+) -> str:
+    """Build ``MRFProperties`` from resolved MRF entries.
+
+    Each *entries* item needs keys: ``name``, ``cellZone``, ``origin``,
+    ``axis``, ``omega``.  Optional per-entry ``nonRotatingPatches`` overrides
+    the shared *non_rotating* list.
+    """
+    shared_nr = non_rotating or []
+    blocks: list[str] = []
+    for i, e in enumerate(entries):
+        name = str(e.get("name") or (f"MRF{i + 1}" if len(entries) > 1 else "MRF"))
+        cz = e["cellZone"]
+        ox, oy, oz = e["origin"]
+        ax, ay, az = e["axis"]
+        omega = float(e["omega"])
+        nr = e.get("nonRotatingPatches")
+        if nr is None:
+            nr = shared_nr
+        if nr:
+            nr_block = f"nonRotatingPatches ( {' '.join(nr)} );"
+        else:
+            nr_block = "nonRotatingPatches ();"
+        blocks.append(
+            f"""{name}
+{{
+    cellZone            {cz};
+    active              yes;
+    {nr_block}
+    origin              ({ox} {oy} {oz});
+    axis                ({ax} {ay} {az});
+    omega               {omega};
+}}"""
+        )
+    body = "\n\n".join(blocks) if blocks else "// (no MRF zones)"
+    return (
+        _foam_header("dictionary", "MRFProperties", location)
+        + f"""
+
+{body}
+
+// ************************************************************************* //
+"""
+    )
+
+
 def _is_cyclic_ami_patch(name: str, patch_types: dict[str, str] | None) -> bool:
     if patch_types and patch_types.get(name) == "cyclicAMI":
         return True
@@ -412,7 +476,9 @@ def _field_U(
     patches: list[str],
     *,
     patch_types: dict[str, str] | None = None,
+    moving_wall_patches: list[str] | None = None,
 ) -> str:
+    moving = set(moving_wall_patches or [])
     blocks: list[str] = []
     for p in patches:
         if _is_cyclic_ami_patch(p, patch_types):
@@ -429,6 +495,15 @@ def _field_U(
                 f"""    {p}
     {{
         type            pressureInletOutletVelocity;
+        value           uniform (0 0 0);
+    }}"""
+            )
+        elif p in moving or "impeller" in p.lower():
+            # MRF: blade walls use absolute movingWallVelocity (omega x r)
+            blocks.append(
+                f"""    {p}
+    {{
+        type            movingWallVelocity;
         value           uniform (0 0 0);
     }}"""
             )
