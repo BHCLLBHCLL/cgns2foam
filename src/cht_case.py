@@ -285,7 +285,7 @@ SIMPLE
 }
 relaxationFactors
 {
-    fields { p_rgh 0.3; }
+    fields { p_rgh 0.3; rho 0.05; }
     equations { U 0.3; h 0.3; }
 }
 
@@ -331,6 +331,75 @@ regions
     fluid ( {' '.join(fluid)} )
     solid ( {' '.join(solid)} )
 );
+
+// ************************************************************************* //
+"""
+    )
+
+
+def _fv_options_fluid() -> str:
+    return (
+        _foam_header("dictionary", "fvOptions", "system")
+        + """
+limitT
+{
+    type            limitTemperature;
+    active          yes;
+    selectionMode   all;
+    min             200;
+    max             500;
+}
+
+limitU
+{
+    type            limitVelocity;
+    active          yes;
+    selectionMode   all;
+    max             100;
+}
+
+// ************************************************************************* //
+"""
+    )
+
+
+def _fv_options_solid_heat(power_watts: float) -> str:
+    """Volumetric heat source for a solid region (total power in watts).
+
+    Uses ``semiImplicitSource`` with a constant volumetric source rate.
+    The actual power density (W/m³) is computed by OpenFOAM from the
+    cell volumes when ``selectionMode all`` is used with ``Vdot`` mode.
+    """
+    return (
+        _foam_header("dictionary", "fvOptions", "system")
+        + f"""
+heatSource
+{{
+    type            scalarSemiImplicitSource;
+    active          yes;
+    selectionMode   all;
+    volumeMode      specific;
+    sources
+    {{
+        h
+        {{
+            explicit       {power_watts};
+            implicit       0;
+        }}
+    }}
+}}
+
+// ************************************************************************* //
+"""
+    )
+
+
+def _radiation_none() -> str:
+    return (
+        _foam_header("dictionary", "radiationProperties", "constant")
+        + """
+radiation       off;
+radiationModel  none;
 
 // ************************************************************************* //
 """
@@ -448,6 +517,15 @@ def _field_T(
         value           $internalField;
     }}"""
             )
+        elif p == "open" or p.startswith("open"):
+            blocks.append(
+                f"""    {p}
+    {{
+        type            inletOutlet;
+        inletValue      uniform {T0};
+        value           uniform {T0};
+    }}"""
+            )
         else:
             blocks.append(
                 f"""    {p}
@@ -455,7 +533,9 @@ def _field_T(
         type            zeroGradient;
     }}"""
             )
-    body = "\n\n".join(blocks) if blocks else "    // (no patches yet)"
+    body = '    #includeEtc "caseDicts/setConstraintTypes"\n\n' + (
+        "\n\n".join(blocks) if blocks else "    // (no patches yet)"
+    )
     return (
         _foam_header("volScalarField", "T", "0")
         + f"""
@@ -514,7 +594,9 @@ def _field_U(
         type            noSlip;
     }}"""
             )
-    body = "\n\n".join(blocks) if blocks else "    // (no patches yet)"
+    body = '    #includeEtc "caseDicts/setConstraintTypes"\n\n' + (
+        "\n\n".join(blocks) if blocks else "    // (no patches yet)"
+    )
     return (
         _foam_header("volVectorField", "U", "0")
         + f"""
@@ -541,6 +623,14 @@ def _field_p(
     for p in patches:
         if _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
+        elif p == "open" or p.startswith("open"):
+            blocks.append(
+                f"""    {p}
+    {{
+        type            calculated;
+        value           uniform {p0};
+    }}"""
+            )
         else:
             blocks.append(
                 f"""    {p}
@@ -549,7 +639,9 @@ def _field_p(
         value           $internalField;
     }}"""
             )
-    body = "\n\n".join(blocks) if blocks else "    // (no patches)"
+    body = '    #includeEtc "caseDicts/setConstraintTypes"\n\n' + (
+        "\n\n".join(blocks) if blocks else "    // (no patches)"
+    )
     return (
         _foam_header("volScalarField", "p", "0")
         + f"""
@@ -568,6 +660,7 @@ boundaryField
 
 def _field_p_rgh(
     patches: list[str],
+    p0: float = 101325.0,
     *,
     patch_types: dict[str, str] | None = None,
 ) -> str:
@@ -575,12 +668,13 @@ def _field_p_rgh(
     for p in patches:
         if _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
-        elif p.startswith("open"):
+        elif p == "open" or p.startswith("open"):
             blocks.append(
                 f"""    {p}
     {{
-        type            fixedValue;
-        value           uniform 0;
+        type            prghTotalPressure;
+        p0              uniform {p0};
+        value           uniform {p0};
     }}"""
             )
         else:
@@ -588,15 +682,17 @@ def _field_p_rgh(
                 f"""    {p}
     {{
         type            fixedFluxPressure;
-        value           uniform 0;
+        value           $internalField;
     }}"""
             )
-    body = "\n\n".join(blocks) if blocks else "    // (no patches)"
+    body = '    #includeEtc "caseDicts/setConstraintTypes"\n\n' + (
+        "\n\n".join(blocks) if blocks else "    // (no patches)"
+    )
     return (
         _foam_header("volScalarField", "p_rgh", "0")
         + f"""
 dimensions      [1 -1 -2 0 0 0 0];
-internalField   uniform 0;
+internalField   uniform {p0};
 
 boundaryField
 {{
@@ -651,6 +747,19 @@ patches
 # ---------------------------------------------------------------------------
 
 
+def _decompose_par_dict(n_procs: int = 8, *, location: str = "system") -> str:
+    return (
+        _foam_header("dictionary", "decomposeParDict", location)
+        + f"""
+numberOfSubdomains  {n_procs};
+
+method          scotch;
+
+// ************************************************************************* //
+"""
+    )
+
+
 def _allrun_pre_full(
     fluid: list[str],
     solid: list[str],
@@ -694,14 +803,21 @@ def _allrun_pre_full(
     return "\n".join(lines) + "\n"
 
 
-def _allrun() -> str:
-    return """#!/bin/sh
+def _allrun(*, n_procs: int = 8) -> str:
+    return f"""#!/bin/sh
 set -e
-cd "${0%/*}" || exit
-. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions
+cd "${{0%/*}}" || exit
+. ${{WM_PROJECT_DIR:?}}/bin/tools/RunFunctions
 #------------------------------------------------------------------------------
 ./Allrun.pre
-runApplication $(getApplication)
+
+# Decompose and run in parallel ({n_procs} ranks)
+runApplication -o -s decomposePar decomposePar -allRegions -copyZero -force
+runParallel -o -np {n_procs} $(getApplication)
+
+# Reconstruct for post-processing
+runApplication -o -s reconstructParMesh reconstructParMesh -allRegions -constant
+runApplication -o -s reconstructPar reconstructPar -allRegions
 #------------------------------------------------------------------------------
 """
 
@@ -832,11 +948,16 @@ def write_cht_case(
     _write_text(out / "setup_report.json", json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     _write_text(out / "coupling_scan.json", json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
+    _write_text(out / "system" / "decomposeParDict", _decompose_par_dict(8))
+    for foam_name in fluid + solid:
+        sdir = out / "system.orig" / foam_name
+        _write_text(sdir / "decomposeParDict", _decompose_par_dict(8, location="system"))
+
     _write_text(
         out / "Allrun.pre",
         _allrun_pre_full(fluid, solid, has_ami=bool(unique_ami)),
     )
-    _write_text(out / "Allrun", _allrun())
+    _write_text(out / "Allrun", _allrun(n_procs=8))
     _write_text(out / "Allclean", _allclean())
 
     # Make scripts executable on POSIX (no-op on Windows)

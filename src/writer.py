@@ -410,25 +410,24 @@ def _write_boundary(path: str, mesh: Mesh, source: str,
 
 def _write_cell_zones(path: str, mesh: Mesh, source: str,
                       options: WriteOptions) -> None:
-    fmt = _mesh_fmt(options)
-    # OpenFOAM v2412 (openfoam.com) expects ``class regIOobject`` here;
-    # the openfoam.org branch uses ``cellZoneList`` instead.  We target
-    # v2412, which is also what ANSA emits.
+    # Always ASCII: binary List<label> embedded in a dictionary is fragile
+    # (label value 10 == 0x0A looks like a newline and breaks bracket matching).
+    # OpenFOAM v2412 expects ``class regIOobject`` (ANSA / openfoam.com).
     with open(path, "wb") as fh:
-        fh.write(_full_header(source, "regIOobject", "cellZones",
-                              fmt=fmt, location=options.mesh_location,
-                              ansa_spacing=options.ansa_headers))
-        # Filter out empty zones
+        fh.write(_full_header(
+            source, "regIOobject", "cellZones",
+            fmt="ascii",
+            location=options.mesh_location,
+            ansa_spacing=options.ansa_headers,
+        ))
         zones = [z for z in mesh.cell_zones if z.cell_labels.size > 0]
         fh.write(f"{len(zones)}\n(\n".encode("ascii"))
         for z in zones:
             fh.write(f"\t{z.name}\n\t{{\n".encode("ascii"))
             fh.write(b"\t\ttype cellZone;\n")
-            fh.write(b"\t\tcellLabels\tList<label>")
-            if fmt == "ascii":
-                _write_ascii_label_list(fh, z.cell_labels)
-            else:
-                _write_binary_label_list(fh, z.cell_labels)
+            # Space after List<label> is required by the dictionary parser.
+            fh.write(b"\t\tcellLabels\tList<label> ")
+            _write_ascii_label_list(fh, z.cell_labels)
             fh.write(b"\t;\n\t}\n")
         fh.write(b")\n")
 

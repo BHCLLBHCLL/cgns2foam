@@ -25,15 +25,19 @@ import numpy as np
 from .cht_case import (
     _allclean,
     _control_dict_cht,
+    _decompose_par_dict,
     _field_T,
     _field_U,
     _field_p,
     _field_p_rgh,
+    _fv_options_fluid,
+    _fv_options_solid_heat,
     _fv_schemes_fluid,
     _fv_schemes_solid,
     _fv_solution_fluid,
     _fv_solution_solid,
     _gravity,
+    _radiation_none,
     _region_properties,
     _thermophysical_fluid,
     _thermophysical_solid,
@@ -54,6 +58,7 @@ from .regions_config import (
     MERGED_FLUID_REGION,
     MrfRegionSpec,
     RegionsConfig,
+    HeatSourceSpec,
     load_sidecar_regions,
 )
 from .topology import (
@@ -63,6 +68,7 @@ from .topology import (
     _assemble_ordered_mesh,
     _bc_type_to_foam,
     _sanitize_patch_name,
+    foam_patch_type_for_name,
 )
 from .writer import WriteOptions, write_poly_mesh
 
@@ -285,7 +291,7 @@ def _region_patch_plan(
                 i += 1
             used.add(pname)
             patches.append(
-                (pname, _bc_type_to_foam(bc.bc_type), global_ids(zi, ids), {})
+                (pname, foam_patch_type_for_name(pname, bc.bc_type), global_ids(zi, ids), {})
             )
             assigned[zi][ids] = True
 
@@ -297,7 +303,11 @@ def _region_patch_plan(
                 pname = f"{default_exterior_name}_{i}"
                 i += 1
             used.add(pname)
-            patches.append((pname, "wall", global_ids(zi, remaining), {}))
+            # Name-based override: "open*" must be patch (total-pressure opening),
+            # never wall — even when faces were not tagged as a CGNS BC.
+            patches.append(
+                (pname, foam_patch_type_for_name(pname, "wall"), global_ids(zi, remaining), {})
+            )
             assigned[zi][remaining] = True
 
     return patches
@@ -386,13 +396,19 @@ def build_merged_region_mesh(
         indices, case, zone_topos, foam_name, report,
         face_offset=face_offset_list,
     )
-    cell_zones.insert(
-        0,
-        CellZone(
-            name=foam_name,
-            cell_labels=np.concatenate(all_labels) if all_labels else np.empty(0, dtype=np.int64),
-        ),
-    )
+    # Prefer per-source-zone cellZones (needed by MRF). Only add a region-wide
+    # zone when this region is a single CGNS zone (typical solids).
+    if not cell_zones:
+        cell_zones = [
+            CellZone(
+                name=foam_name,
+                cell_labels=(
+                    np.concatenate(all_labels)
+                    if all_labels
+                    else np.empty(0, dtype=np.int64)
+                ),
+            )
+        ]
     return _assemble_ordered_mesh(
         points,
         face_offsets,
@@ -433,14 +449,17 @@ def build_region_meshes(
     return out
 
 
-def _allrun_direct() -> str:
-    return """#!/bin/sh
+def _allrun_direct(*, n_procs: int = 8) -> str:
+    return f"""#!/bin/sh
 set -e
-cd "${0%/*}" || exit
-. ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions
+cd "${{0%/*}}" || exit
+. ${{WM_PROJECT_DIR:?}}/bin/tools/RunFunctions
 #------------------------------------------------------------------------------
-# cgns2foam --cht-direct: regions already split; just run the solver
-runApplication $(getApplication)
+# cgns2foam --cht-direct: regions already split; decompose + parallel run
+runApplication -o -s decomposePar decomposePar -allRegions -copyZero -force
+runParallel -o -np {n_procs} $(getApplication)
+runApplication -o -s reconstructParMesh reconstructParMesh -allRegions -constant
+runApplication -o -s reconstructPar reconstructPar -allRegions
 #------------------------------------------------------------------------------
 """
 
@@ -472,6 +491,7 @@ def write_cht_direct_case(
 
     mrf_specs = list(regions_config.mrf_regions) if regions_config else []
     mrf_summary: list[dict[str, Any]] = []
+    heat_sources = list(regions_config.heat_sources) if regions_config else []
 
     _write_text(out / "constant" / "regionProperties", _region_properties(fluid, solid))
     _write_text(out / "constant" / "g", _gravity(gravity))
@@ -481,6 +501,7 @@ def write_cht_direct_case(
     )
     _write_text(out / "system" / "fvSchemes", _fv_schemes_fluid())
     _write_text(out / "system" / "fvSolution", _fv_solution_fluid())
+    _write_text(out / "system" / "decomposeParDict", _decompose_par_dict(8))
 
     for foam_name, mesh in region_meshes.items():
         rtype = region_type.get(foam_name, "fluid")
@@ -507,6 +528,7 @@ def write_cht_direct_case(
         if rtype == "fluid":
             _write_text(cdir / "thermophysicalProperties", _thermophysical_fluid())
             _write_text(cdir / "turbulenceProperties", _turbulence_laminar())
+            _write_text(cdir / "radiationProperties", _radiation_none())
             if mrf_specs and foam_name == MERGED_FLUID_REGION:
                 mrf_entries = resolve_mrf_entries(mrf_specs, case, patch_names)
                 _write_text(
@@ -519,6 +541,8 @@ def write_cht_direct_case(
                 mrf_summary = mrf_entries
             _write_text(sdir / "fvSchemes", _fv_schemes_fluid())
             _write_text(sdir / "fvSolution", _fv_solution_fluid())
+            _write_text(sdir / "fvOptions", _fv_options_fluid())
+            _write_text(sdir / "decomposeParDict", _decompose_par_dict(8, location="system"))
             _write_text(zdir / "T", _field_T("fluid", patch_names, patch_types=patch_types))
             _write_text(
                 zdir / "U",
@@ -534,8 +558,17 @@ def write_cht_direct_case(
             _write_text(zdir / "p_rgh", _field_p_rgh(patch_names, patch_types=patch_types))
         else:
             _write_text(cdir / "thermophysicalProperties", _thermophysical_solid())
+            _write_text(cdir / "radiationProperties", _radiation_none())
             _write_text(sdir / "fvSchemes", _fv_schemes_solid())
             _write_text(sdir / "fvSolution", _fv_solution_solid())
+            _write_text(sdir / "decomposeParDict", _decompose_par_dict(8, location="system"))
+            # Volumetric heat source if this solid region has one
+            hs = next(
+                (h for h in heat_sources if h.region_name == foam_name),
+                None,
+            )
+            if hs is not None:
+                _write_text(sdir / "fvOptions", _fv_options_solid_heat(hs.power))
             _write_text(zdir / "T", _field_T("solid", patch_names, patch_types=patch_types))
             _write_text(zdir / "p", _field_p(patch_names, patch_types=patch_types))
 

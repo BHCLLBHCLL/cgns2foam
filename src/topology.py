@@ -397,6 +397,14 @@ def _bc_type_to_foam(bc_type: str) -> str:
     return "patch"
 
 
+def foam_patch_type_for_name(name: str, bc_type: str) -> str:
+    """Override mesh patch type from name (e.g. openings must be ``patch``)."""
+    low = name.lower()
+    if low == "open" or low.startswith("open"):
+        return "patch"
+    return _bc_type_to_foam(bc_type)
+
+
 def _face_coord_key(
     points: np.ndarray,
     face_offsets: np.ndarray,
@@ -618,7 +626,13 @@ def build_mesh(
             base_name = _sanitize_patch_name(bc.name)
             patch_name = _unique_patch_name(base_name, used_patch_names)
             used_patch_names.add(patch_name)
-            patches.append((patch_name, _bc_type_to_foam(bc.bc_type), global_ids))
+            patches.append(
+                (
+                    patch_name,
+                    foam_patch_type_for_name(patch_name, bc.bc_type),
+                    global_ids,
+                )
+            )
             bc_assigned[local_ids] = True
 
         # Remaining boundary faces (not covered by any BC) → default patch
@@ -626,7 +640,14 @@ def build_mesh(
         if remaining.size:
             default_name = _unique_patch_name(default_exterior_name, used_patch_names)
             used_patch_names.add(default_name)
-            patches.append((default_name, "wall", remaining + f_cursor))
+            # leftover exterior: name-based override keeps open* as patch
+            patches.append(
+                (
+                    default_name,
+                    foam_patch_type_for_name(default_name, "wall"),
+                    remaining + f_cursor,
+                )
+            )
 
         # cellZone covering all cells from this zone (optionally merged by name)
         cz_labels = np.arange(cell_offsets[zi], cell_offsets[zi + 1], dtype=np.int64)

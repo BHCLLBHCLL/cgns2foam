@@ -80,12 +80,20 @@ class MrfRegionSpec:
 
 
 @dataclass
+class HeatSourceSpec:
+    """Volumetric heat source for a solid region (watts)."""
+    region_name: str  # sanitized OpenFOAM region name
+    power: float       # total power in watts
+
+
+@dataclass
 class RegionsConfig:
     path: Path
     specs: list[RegionSpec]
     #: CGNS zone name → (OpenFOAM region name, fluid|solid)
     zone_map: dict[str, tuple[str, str]]
     mrf_regions: list[MrfRegionSpec] = field(default_factory=list)
+    heat_sources: list[HeatSourceSpec] = field(default_factory=list)
 
     def foam_name_for(self, zone_name: str) -> str | None:
         hit = self.zone_map.get(zone_name)
@@ -414,6 +422,66 @@ def _parse_mrf_regions(
     return out
 
 
+def _parse_heat_sources(
+    data: dict[str, Any],
+    specs: list[RegionSpec],
+) -> list[HeatSourceSpec]:
+    """Parse ``heat_sources`` from JSON.
+
+    Format::
+
+        "heat_sources": {
+            "laptop_3d_geom.solid_region.CPU": 20,
+            "solid_region.Cu_block": 15
+        }
+
+    Keys are matched to solid RegionSpec names (sanitized) or their CGNS
+    cell-zone names.  Values are total power in watts.
+    """
+    raw = data.get("heat_sources")
+    if not isinstance(raw, dict):
+        return []
+    # Build lookup: sanitized region name → spec, and cell_zone → spec
+    by_foam_name: dict[str, RegionSpec] = {}
+    by_zone: dict[str, RegionSpec] = {}
+    for s in specs:
+        if s.region_type != "solid":
+            continue
+        by_foam_name[s.name] = s
+        for cz in s.cell_zones:
+            by_zone[_sanitize_patch_name(cz).lower()] = s
+            by_zone[cz.lower()] = s
+
+    out: list[HeatSourceSpec] = []
+    for key, val in raw.items():
+        k = str(key).strip()
+        if not k:
+            continue
+        power = float(val)
+        if power <= 0:
+            continue
+        # Match by sanitized name (case-insensitive) or raw zone name
+        spec = by_foam_name.get(_sanitize_patch_name(k))
+        if spec is None:
+            spec = by_foam_name.get(k)
+        if spec is None:
+            spec = by_zone.get(_sanitize_patch_name(k).lower())
+        if spec is None:
+            spec = by_zone.get(k.lower())
+        if spec is None:
+            # Fuzzy: try token match
+            for fname, s in by_foam_name.items():
+                if k.lower() in fname.lower() or fname.lower() in k.lower():
+                    spec = s
+                    break
+        if spec is None:
+            raise ValueError(
+                f"heat_sources key {k!r} does not match any solid region"
+            )
+        out.append(HeatSourceSpec(region_name=spec.name, power=power))
+    return out
+
+
 def load_regions_config(
     path: str | Path,
     zone_names: list[str],
@@ -455,11 +523,13 @@ def load_regions_config(
         )
 
     mrf_regions = _parse_mrf_regions(data, zone_names)
+    heat_sources = _parse_heat_sources(data, specs)
     return RegionsConfig(
         path=p,
         specs=specs,
         zone_map=zone_map,
         mrf_regions=mrf_regions,
+        heat_sources=heat_sources,
     )
 
 
