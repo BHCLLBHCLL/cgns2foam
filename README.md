@@ -28,7 +28,8 @@ tests/
 ├── run_all.py         # 三个 case 的端到端跑通脚本（含 checkMesh）
 ├── test_box.py        # unittest：拓扑统计与 ANSA 头格式
 ├── test_bc_overlap.py # unittest：跨 zone 同名 BC 重叠裁剪
-└── test_couplings.py  # unittest：区域类型与耦合报告
+├── test_couplings.py  # unittest：区域类型与耦合报告
+└── test_regions_config.py # unittest：JSON 区域/材料/热源/重力等配置解析
 cases/                 # 测试 case + ANSA 产生的参考 OpenFOAM 工程
 requirements.txt
 docs/
@@ -273,5 +274,5 @@ $FOAM_BASHRC                                # 环境变量覆盖
   [docs/TECHNICAL.md](docs/TECHNICAL.md)（§2.1 写出选项、§3.5 BC 裁剪）。
 - 单元测试：
   ```bash
-  python3 -m unittest tests.test_box tests.test_bc_overlap tests.test_couplings -v
+  python3 -m unittest tests.test_box tests.test_bc_overlap tests.test_couplings tests.test_regions_config -v
   ```

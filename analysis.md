@@ -313,3 +313,47 @@
 ---
 
 需要我直接帮你改代码吗？如果要，我建议先确认一件事：**Zmin 那个面在物理上到底是"桌面（应是 wall）"还是"开口（应是 open）"**？这决定了是走方向 1（拆 patch + 改 wall）还是方向 2（保留 open 但调 BC）。
+
+
+  修正内容（已提交于 4dc6efb，README 最后两行测试清单微调待提交）
+
+  P0（功能性 bug）
+
+  ┌───────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┬───────────────────────────────┐
+  │             问题              │                                                                   修法                                                                   │             验证              │
+  ├───────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ 热源单位错（W 被当 W/m³）     │ _fv_options_solid_heat 改 volumeMode absolute，同区域多热源求和                                                                          │ 新案例 CPU fvOptions 已是     │
+  │                               │                                                                                                                                          │ absolute                      │
+  ├───────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ JSON "g" 被忽略               │ regions_config 解析 "g"/"gravity" → 透传至 constant/g                                                                                    │ 新案例 value (0.0 -9.81 0.0)  │
+  │                               │                                                                                                                                          │ ✓                             │
+  ├───────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ residualControl { default }   │ 流体写 p_rgh/U/h、固体写 h 显式场名                                                                                                      │ 已核验                        │
+  │ 无效                          │                                                                                                                                          │                               │
+  ├───────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ 进/出口静默变壁面             │ CGNS bc_type 随 patch plan 透传（Patch.cgns_bc_type），BCInflow/BCOutflow/BCFarfield 等自动按总压开口生成，并在控制台 +                  │ open 口 U/p_rgh/T 正确        │
+  │                               │ setup_report.json 的 warnings 中提示                                                                                                     │                               │
+  ├───────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
+  │ constraint patch 启动崩溃     │ _constraint_rule 让 symmetryPlane/empty/wedge/cyclic 场类型与网格 patch 自动一致                                                         │ 单测覆盖                      │
+  └───────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┴───────────────────────────────┘
+
+  P1
+
+  - materials 段：固体按区域覆盖 rho/Cp/kappa/molWeight，流体 air 覆盖 mu/Pr/Cp。新案例 Cu=8960/385/390、CPU=2330/705/148、Cover=塑料，不再全是铝。
+  - external_convection 段：正则命中 patch → externalWallHeatFluxTemperature（mode coefficient）。
+  - 弃用 --cht：CLI、convert_file(cht=...)、write_cht_case/_allrun_pre_full/_create_patch_ami 死代码全部移除；文档注明移除原因。
+
+  P2
+
+  - SIMPLE：nNonOrthogonalCorrectors 1 + momentumPredictor true（按你要求）。
+  - n_procs/endTime/writeInterval/purgeWrite/initial_conditions 全部 JSON 化，decomposeParDict×3 与 Allrun -np 单一来源。
+  - fvSchemes 附二阶 linearUpwind 注释模板；MRF cellZone 校验提前报错；region_type 兜底进 warnings。
+
+  刷新图档与测试
+
+  - cases/laptop_thermal_steady_scaled_v3_orig_BCs_fix_cht_air 已用新代码+新 JSON 重新生成（约 4 分钟），上述每项均在生成文件中逐一核验；setup_report.json 新增
+  settings/materials_applied/opening_patches/warnings 元数据。
+  - 单元测试 24/24 通过（新增 7 个 TestExtendedConfig 用例；test_box 3 个失败为预先存在的 LFS 数据缺失，与本次无关）。
+  - README / AGENTS / TECHNICAL 已同步（--cht 移除说明、新 JSON 键表、BC 生成规则、求解设置说明）。
+
+  可直接 cd cases/laptop_thermal_steady_scaled_v3_orig_BCs_fix_cht_air && ./Allrun 跑新案例——这次应能看到温度真正上升且 SIMPLE 按 residualControl 提前收敛。
