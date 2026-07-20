@@ -218,3 +218,98 @@
   └────────┴────────────────────────────────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────┘
 
   如需，我可以先修 P0 的三项（热源改 volumeMode absolute、JSON 解析 "g" 并透传、residualControl 写显式场名），都是小改动且能立刻在现有案例日志里验证效果。
+  
+  
+  我已重新通读 `src/cht_case.py`、`src/cht_direct.py`、`src/regions_config.py`、JSON 配置以及实际生成的算例文件（`0/`、`constant/`、`system/`）。下面是对**当前代码/算例**的重新分析。
+
+---
+
+## 一、Claude 修正后已确认正确的部分 ✅
+
+| 项 | 文件 | 状态 |
+|---|---|---|
+| `open` patch 类型 = `patch` | `constant/air/polyMesh/boundary:135` | ✅ |
+| `open` 的 `p_rgh` = `prghTotalPressure` (p0=101325) | `0/air/p_rgh:87-92` | ✅ |
+| `open` 的 `U` = `pressureInletOutletVelocity` | `0/air/U:80-84` | ✅ |
+| `open` 的 `T` = `inletOutlet` (inletValue=300) | `0/air/T:101-106` | ✅ |
+| `open` 的 `p` = `calculated` | `0/air/p:87-91` | ✅ |
+| `#includeEtc "caseDicts/setConstraintTypes"` 已加到所有 0/ 场 | 各 0/ 文件 line 23 | ✅ |
+| CPU 热源 `scalarSemiImplicitSource` + `volumeMode absolute` + `explicit 1.0`（=1W 总功率） | `system/laptop_3d_geom_solid_region_CPU/fvOptions` | ✅ |
+| Cu_block 无 fvOptions（不发热） | `system/solid_region_Cu_block/` 无 fvOptions | ✅ |
+| CPU 物性已覆盖为硅：ρ=2330, Cp=705, κ=148 | `constant/laptop_3d_geom_solid_region_CPU/thermophysicalProperties` | ✅ |
+| `pRefCell`/`pRefValue` 已从 fvSolution 移除 | `system/air/fvSolution` | ✅ |
+| 8 核并行 `decomposeParDict` + `Allrun` | `system/decomposeParDict`、`Allrun` | ✅ |
+| 重力 g=(0,-9.81,0) 与 JSON 一致 | `constant/g` | ✅ |
+| CHT 耦合 `turbulentTemperatureRadCoupledMixed` 双向 | `0/air/T`、`0/.../T` | ✅ |
+| MRF `nonRotatingPatches` 含 `open`、不含 impeller | `constant/air/MRFProperties` | ✅ |
+
+这些上一轮分析中的关键问题都已落地。
+
+---
+
+## 二、仍然存在的关键问题（直接导致 Zmin ~3.5 m/s）
+
+### 🔴 问题 1：整个外边界只有**一个** `open` patch，且是 `prghTotalPressure` —— 这是 Zmin 高速的根因
+
+`constant/air/polyMesh/boundary` 显示 `open` 只有 **1 个 patch、17746 个面**，即空气域的全部外边界（很可能是包围盒的 6 个面合并）都被当作同一个总压出口。
+
+后果：
+- `prghTotalPressure` 是"总压给定、方向自适应"的边界 —— 同一个 patch 上**一面在出流、另一面在入流**是合法的。
+- 两个 MRF 风扇把内部空气搅动，气流撞到 Zmin（盒子底部）那部分 `open` 面就**出流**；为了质量守恒，同一 `open` patch 的其它面（顶部/侧面）就**入流**，入流速度被 `pressureInletOutletVelocity` 钳成 `(0 0 0)`。
+- 出流区与入流区在同一 patch 上紧挨（尤其在 Zmin 边缘/角点），形成强烈剪切层 → **角点附近 U ≈ 3.5 m/s**，这正是你观察到的现象。
+- 这不是网格问题，也不是离散格式问题，是**边界拓扑问题**：把"应当作为墙面/明确入口/明确出口"的多个面合并成了一个自适应总压面。
+
+### 🔴 问题 2：没有明确的"入口"，算例本质是"开盒+总压边界+内部风扇"
+
+当前唯一能让空气进出的就是这一个 `open`。风扇只是内部再循环驱动者。物理上等价于"笔记本浸在无限大静止空气里"，但边界又离风扇太近（Zmin 紧贴风扇出口），所以近场速度被边界吸入/排出主导，CHT 温升被边界来的 300K 冷风持续冲刷掉。
+
+### 🟡 问题 3：`pressureInletOutletVelocity` 的 `value uniform (0 0 0)` 在入流区强制零速
+
+入流区被钉死为 0 速度，与出流区的有限速度在同一 patch 上对接 → 局部加速度大、`limitU max=100` 不会触发但剪切层速度可达数 m/s。这是问题 1 的放大器。
+
+### 🟡 问题 4：`inletOutlet` T=300K 把入流钉成环境温度
+
+与问题 1 叠加：只要 `open` 同时有入流和出流，入流区不断灌入 300K 冷气，1W 热源的温升会被立刻吹散，CHT 看不到效果（与你上一轮"2000 步 T 几乎不变"一致）。
+
+---
+
+## 三、次要问题（不致错但影响精度/收敛）
+
+### 🟢 问题 5：`div(phi,*)` 全部一阶 upwind
+`system/air/fvSchemes:30-32` 仍是 `bounded Gauss upwind`。一阶迎风数值粘性大，会抹平速度梯度、让 Zmin 剪切层看起来"扩散"得更广。注释里已写了切换到 `linearUpwind` 的方法，但默认未启用。稳态收敛后应切换。
+
+### 🟢 问题 6：`rho` 松弛因子 0.05 偏低
+`system/air/fvSolution:48` `rho 0.05`。对 perfectGas + 强制对流，ρ 变化不大时 0.05 可接受，但会拖慢收敛。可提到 0.5–1.0。
+
+### 🟢 问题 7：固体 `relaxationFactors equations { h 1; }` 无欠松弛
+`system/.../fvSolution`。固体纯导热线性问题，h=1 没问题；但 CHT 耦合初期固体温度会震荡，可临时用 0.7 加速稳定后再回到 1。
+
+### 🟢 问题 8：`limitT max=500` 偏低
+1W 热源下不会触发，但若后续加大功率（如 20W CPU），硅芯片局部温度可能超过 500K 被截断。建议提到 600。
+
+### 🟢 问题 9：MRF omega=100 rad/s（≈955 RPM）
+对笔记本风扇偏低（实际 3000–5000 RPM）。若是有意测试可忽略；若想看真实流场，应按实际转速设到 300–500 rad/s。这不是 Zmin 高速的原因（即便 ω=100，叶尖速度 ~5 m/s 量级，与观察一致）。
+
+---
+
+## 四、根因小结与建议
+
+**Zmin ~3.5 m/s 的根因**：`open` 这一个 patch 同时承担了"入口+出口"两种角色，且物理上把本应是**墙面**或**分开设定的入口/出口**的外边界全部合并成了一个自适应总压面。风扇驱动的内部环流在 Zmin 出流、在其它面入流，同一 patch 上的出入流剪切层产生了你看到的 3.5 m/s。
+
+**建议的修正方向**（按优先级）：
+
+1. **拆分 `open` patch**（最关键）：在 CGNS 端或后处理阶段，把外边界按几何面拆成 6 个独立 patch（如 `open_xmin / open_xmax / open_ymin / open_ymax / open_zmin / open_zmax`），然后：
+   - 把**真正应作为入口**的面（如风扇对面、顶部）设为 `pressureInletOutletVelocity` + `inletOutlet T=300` + `prghTotalPressure`；
+   - 把**应作为出口**的面（如风扇出风方向那侧）设为 `inletOutlet` + `pressureInletOutletVelocity` + `prghTotalPressure`；
+   - 把**应是墙面**的面（如笔记本底面 Zmin 若是桌面侧）改回 `wall` + `noSlip` + `fixedFluxPressure` + `zeroGradient T`。
+   这样出入流分离，剪切层消失。
+
+2. **若几何上 Zmin 确实是开口**（不是桌面）：保持 `open` 但把 `pressureInletOutlet2. **若几何上 Zmin 确实是开口**（不是桌面）：保持 `open` 但把 `pressureInletOutletVelocity` 的 `value` 从 `(0 0 0)` 改成 `internalField` 或方向化初值，减少入流区强制零速造成的剪切。同时把 `inletOutlet` 的 `inletValue` 改成 `zeroGradient`（让出流区不被 300K 钳制），仅保留真正入口面为 300K。
+
+3. **稳态收敛后**：把 `div(phi,U/h/K)` 从 `upwind` 切到 `bounded Gauss linearUpwind grad(...)`，去掉一阶数值粘性。
+
+4. **加大热源到真实值**（如 20W）后再看 CHT 效果；1W 太小，温升会被边界入流完全淹没。
+
+---
+
+需要我直接帮你改代码吗？如果要，我建议先确认一件事：**Zmin 那个面在物理上到底是"桌面（应是 wall）"还是"开口（应是 open）"**？这决定了是走方向 1（拆 patch + 改 wall）还是方向 2（保留 open 但调 BC）。
