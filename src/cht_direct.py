@@ -291,7 +291,12 @@ def _region_patch_plan(
                 i += 1
             used.add(pname)
             patches.append(
-                (pname, foam_patch_type_for_name(pname, bc.bc_type), global_ids(zi, ids), {})
+                (
+                    pname,
+                    foam_patch_type_for_name(pname, bc.bc_type),
+                    global_ids(zi, ids),
+                    {"cgns_bc_type": bc.bc_type},
+                )
             )
             assigned[zi][ids] = True
 
@@ -311,6 +316,27 @@ def _region_patch_plan(
             assigned[zi][remaining] = True
 
     return patches
+
+
+# CGNS BCType strings that denote a flow opening (inlet / outlet / farfield).
+# Field BCs for these patches follow the "open" total-pressure template.
+_OPENING_BC_TOKENS = (
+    "bcinflow",
+    "bcoutflow",
+    "bcfarfield",
+    "bcextrapolate",
+    "inlet",
+    "outlet",
+    "farfield",
+)
+
+
+def is_opening_bc_type(cgns_bc_type: str | None) -> bool:
+    """True when a CGNS BCType marks an inlet / outlet / farfield patch."""
+    if not cgns_bc_type:
+        return False
+    bt = cgns_bc_type.lower()
+    return any(tok in bt for tok in _OPENING_BC_TOKENS)
 
 
 def build_merged_region_mesh(
@@ -474,7 +500,11 @@ def write_cht_direct_case(
     regions_config: RegionsConfig | None = None,
     end_time: int = 500,
     write_interval: int = 50,
-    gravity: list[float] | None = None,
+    purge_write: int = 0,
+    n_procs: int = 8,
+    gravity: list[float] | tuple[float, float, float] | None = None,
+    initial_t: float = 300.0,
+    initial_p: float = 101325.0,
 ) -> dict[str, Any]:
     """Write a ready-to-run multi-region chtMultiRegionSimpleFoam case."""
     out = Path(out_dir)
@@ -489,22 +519,45 @@ def write_cht_direct_case(
     for r in report.regions:
         region_type[r.foam_name] = r.region_type
 
+    warnings: list[str] = []
     mrf_specs = list(regions_config.mrf_regions) if regions_config else []
     mrf_summary: list[dict[str, Any]] = []
-    heat_sources = list(regions_config.heat_sources) if regions_config else []
+    # Aggregate heat sources per region (total watts); several JSON keys may
+    # point at the same region — sum instead of silently dropping them.
+    heat_by_region: dict[str, float] = defaultdict(float)
+    if regions_config:
+        for hs in regions_config.heat_sources:
+            heat_by_region[hs.region_name] += hs.power
+    ext_conv = regions_config.external_convection if regions_config else None
+
+    if gravity is None and regions_config is not None:
+        gravity = regions_config.gravity
 
     _write_text(out / "constant" / "regionProperties", _region_properties(fluid, solid))
     _write_text(out / "constant" / "g", _gravity(gravity))
     _write_text(
         out / "system" / "controlDict",
-        _control_dict_cht(end_time=end_time, write_interval=write_interval),
+        _control_dict_cht(
+            end_time=end_time,
+            write_interval=write_interval,
+            purge_write=purge_write,
+        ),
     )
     _write_text(out / "system" / "fvSchemes", _fv_schemes_fluid())
     _write_text(out / "system" / "fvSolution", _fv_solution_fluid())
-    _write_text(out / "system" / "decomposeParDict", _decompose_par_dict(8))
+    _write_text(out / "system" / "decomposeParDict", _decompose_par_dict(n_procs))
+
+    opening_patches_all: dict[str, list[str]] = {}
+    convection_applied: dict[str, dict[str, list[float]]] = {}
+    materials_applied: dict[str, dict[str, float]] = {}
 
     for foam_name, mesh in region_meshes.items():
-        rtype = region_type.get(foam_name, "fluid")
+        rtype = region_type.get(foam_name)
+        if rtype is None:
+            rtype = "solid" if foam_name in solid else "fluid"
+            warnings.append(
+                f"region {foam_name!r} not in region scan; assumed {rtype}"
+            )
         loc = f"constant/{foam_name}/polyMesh"
         opts = WriteOptions(
             mesh_format="binary",
@@ -525,11 +578,66 @@ def write_cht_direct_case(
         patch_names = [p.name for p in mesh.patches]
         patch_types = {p.name: p.bc_type for p in mesh.patches}
 
+        # Opening patches: "open*" by name, or a CGNS inlet/outlet/farfield BC.
+        openings: set[str] = set()
+        bc_typed_openings: list[str] = []
+        for p in mesh.patches:
+            if p.name == "open" or p.name.startswith("open"):
+                openings.add(p.name)
+            elif is_opening_bc_type(p.cgns_bc_type):
+                openings.add(p.name)
+                bc_typed_openings.append(f"{p.name} ({p.cgns_bc_type})")
+        if openings:
+            opening_patches_all[foam_name] = sorted(openings)
+        if bc_typed_openings:
+            warnings.append(
+                f"region {foam_name!r}: CGNS inlet/outlet BC(s) mapped to "
+                f"total-pressure openings: {', '.join(bc_typed_openings)}; "
+                "values default to p0/T0 - edit 0/ as needed"
+            )
+
+        # External convection on outer walls (regex match from JSON).
+        conv: dict[str, tuple[float, float]] = {}
+        if ext_conv is not None:
+            for pname in patch_names:
+                if ext_conv.matches(pname):
+                    conv[pname] = (ext_conv.ta, ext_conv.h)
+            if conv:
+                convection_applied[foam_name] = {
+                    p: [ta, h] for p, (ta, h) in sorted(conv.items())
+                }
+
+        mat = regions_config.material_for(foam_name) if regions_config else None
+        if mat is not None:
+            applied = {
+                k: v
+                for k, v in (
+                    ("rho", mat.rho),
+                    ("Cp", mat.cp),
+                    ("kappa", mat.kappa),
+                    ("mu", mat.mu),
+                    ("Pr", mat.pr),
+                    ("molWeight", mat.mol_weight),
+                )
+                if v is not None
+            }
+            if applied:
+                materials_applied[foam_name] = applied
+
         if rtype == "fluid":
-            _write_text(cdir / "thermophysicalProperties", _thermophysical_fluid())
+            _write_text(cdir / "thermophysicalProperties", _thermophysical_fluid(mat))
             _write_text(cdir / "turbulenceProperties", _turbulence_laminar())
             _write_text(cdir / "radiationProperties", _radiation_none())
             if mrf_specs and foam_name == MERGED_FLUID_REGION:
+                valid_cz = {cz.name for cz in mesh.cell_zones}
+                for spec in mrf_specs:
+                    if spec.foam_cell_zone not in valid_cz:
+                        raise ValueError(
+                            f"MRF cellZone {spec.foam_cell_zone!r} is not part of "
+                            f"the {MERGED_FLUID_REGION!r} region mesh "
+                            f"(cellZones: {sorted(valid_cz)}); list the CGNS zone "
+                            "under fluid_regions in the sidecar JSON"
+                        )
                 mrf_entries = resolve_mrf_entries(mrf_specs, case, patch_names)
                 _write_text(
                     cdir / "MRFProperties",
@@ -542,8 +650,18 @@ def write_cht_direct_case(
             _write_text(sdir / "fvSchemes", _fv_schemes_fluid())
             _write_text(sdir / "fvSolution", _fv_solution_fluid())
             _write_text(sdir / "fvOptions", _fv_options_fluid())
-            _write_text(sdir / "decomposeParDict", _decompose_par_dict(8, location="system"))
-            _write_text(zdir / "T", _field_T("fluid", patch_names, patch_types=patch_types))
+            _write_text(sdir / "decomposeParDict", _decompose_par_dict(n_procs, location="system"))
+            _write_text(
+                zdir / "T",
+                _field_T(
+                    "fluid",
+                    patch_names,
+                    initial_t,
+                    patch_types=patch_types,
+                    opening_patches=openings,
+                    convection_patches=conv,
+                ),
+            )
             _write_text(
                 zdir / "U",
                 _field_U(
@@ -552,31 +670,82 @@ def write_cht_direct_case(
                     moving_wall_patches=[
                         p for p in patch_names if "impeller" in p.lower()
                     ] if mrf_specs else None,
+                    opening_patches=openings,
                 ),
             )
-            _write_text(zdir / "p", _field_p(patch_names, patch_types=patch_types))
-            _write_text(zdir / "p_rgh", _field_p_rgh(patch_names, patch_types=patch_types))
+            _write_text(
+                zdir / "p",
+                _field_p(
+                    patch_names,
+                    initial_p,
+                    patch_types=patch_types,
+                    opening_patches=openings,
+                ),
+            )
+            _write_text(
+                zdir / "p_rgh",
+                _field_p_rgh(
+                    patch_names,
+                    initial_p,
+                    patch_types=patch_types,
+                    opening_patches=openings,
+                ),
+            )
         else:
-            _write_text(cdir / "thermophysicalProperties", _thermophysical_solid())
+            _write_text(cdir / "thermophysicalProperties", _thermophysical_solid(mat))
             _write_text(cdir / "radiationProperties", _radiation_none())
             _write_text(sdir / "fvSchemes", _fv_schemes_solid())
             _write_text(sdir / "fvSolution", _fv_solution_solid())
-            _write_text(sdir / "decomposeParDict", _decompose_par_dict(8, location="system"))
+            _write_text(sdir / "decomposeParDict", _decompose_par_dict(n_procs, location="system"))
             # Volumetric heat source if this solid region has one
-            hs = next(
-                (h for h in heat_sources if h.region_name == foam_name),
-                None,
+            power = heat_by_region.get(foam_name)
+            if power:
+                _write_text(sdir / "fvOptions", _fv_options_solid_heat(power))
+            _write_text(
+                zdir / "T",
+                _field_T(
+                    "solid",
+                    patch_names,
+                    initial_t,
+                    patch_types=patch_types,
+                    opening_patches=openings,
+                    convection_patches=conv,
+                ),
             )
-            if hs is not None:
-                _write_text(sdir / "fvOptions", _fv_options_solid_heat(hs.power))
-            _write_text(zdir / "T", _field_T("solid", patch_names, patch_types=patch_types))
-            _write_text(zdir / "p", _field_p(patch_names, patch_types=patch_types))
+            _write_text(
+                zdir / "p",
+                _field_p(
+                    patch_names,
+                    initial_p,
+                    patch_types=patch_types,
+                    opening_patches=openings,
+                ),
+            )
 
     summary = report.to_dict()
     summary["mode"] = "cht-direct"
     summary["solver"] = "chtMultiRegionSimpleFoam"
     if mrf_summary:
         summary["mrf"] = mrf_summary
+    summary["settings"] = {
+        "endTime": end_time,
+        "writeInterval": write_interval,
+        "purgeWrite": purge_write,
+        "nProcs": n_procs,
+        "gravity": list(gravity) if gravity is not None else [0.0, 0.0, -9.81],
+        "initialT": initial_t,
+        "initialP": initial_p,
+    }
+    if heat_by_region:
+        summary["heat_sources"] = {k: v for k, v in sorted(heat_by_region.items())}
+    if materials_applied:
+        summary["materials_applied"] = materials_applied
+    if convection_applied:
+        summary["external_convection"] = convection_applied
+    if opening_patches_all:
+        summary["opening_patches"] = opening_patches_all
+    if warnings:
+        summary["warnings"] = warnings
     summary["regions_written"] = {
         name: {
             "n_cells": mesh.n_cells,
@@ -599,7 +768,7 @@ def write_cht_direct_case(
     text = json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
     _write_text(out / "coupling_scan.json", text)
     _write_text(out / "setup_report.json", text)
-    _write_text(out / "Allrun", _allrun_direct())
+    _write_text(out / "Allrun", _allrun_direct(n_procs=n_procs))
     _write_text(out / "Allclean", _allclean())
     for name in ("Allrun", "Allclean"):
         path = out / name
@@ -677,6 +846,9 @@ def convert_cht_direct(
                 f"axis={list(m.axis)}  origin={org}"
             )
 
+    def _cfg(name: str, default):
+        return getattr(regions_config, name) if regions_config is not None else None
+
     t2 = time.perf_counter()
     summary = write_cht_direct_case(
         out_dir,
@@ -685,8 +857,17 @@ def convert_cht_direct(
         zone_topos,
         source_path=os.path.abspath(cgns_path),
         regions_config=regions_config,
+        end_time=_cfg("end_time", None) or 500,
+        write_interval=_cfg("write_interval", None) or 50,
+        purge_write=_cfg("purge_write", None) or 0,
+        n_procs=_cfg("n_procs", None) or 8,
+        gravity=_cfg("gravity", None),
+        initial_t=_cfg("initial_t", None) or 300.0,
+        initial_p=_cfg("initial_p", None) or 101325.0,
     )
     if verbose:
+        for w in summary.get("warnings", []):
+            print(f"[cgns2foam] warning: {w}")
         print(
             f"[cgns2foam] cht-direct case written to {out_dir} "
             f"({len(summary.get('fluid_regions', []))} fluid, "

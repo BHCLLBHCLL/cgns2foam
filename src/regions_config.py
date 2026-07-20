@@ -39,6 +39,35 @@ Optional MRF (written to ``constant/air/MRFProperties``)::
 
 ``origin`` may be ``"centroid"`` (zone vertex mean). foam2thermal nested
 ``regions[].mrf`` is also accepted.
+
+Other optional keys:
+
+* ``"g"`` / ``"gravity"``: gravity vector, e.g. ``[0, -9.81, 0]``
+  (written to ``constant/g``; default ``(0 0 -9.81)``).
+* ``"materials"``: per-region property overrides.  Keys match regions the
+  same way ``heat_sources`` does; solid values accept ``rho`` / ``Cp`` /
+  ``kappa`` / ``molWeight``, the fluid region ``air`` accepts ``mu`` /
+  ``Pr`` / ``Cp`` / ``molWeight``::
+
+      "materials": {
+        "solid_region.Cu_block": {"rho": 8960, "Cp": 385, "kappa": 390},
+        "air": {"mu": 1.846e-5, "Pr": 0.706, "Cp": 1006.43}
+      }
+
+* ``"external_convection"``: outer-wall convection BC
+  (``externalWallHeatFluxTemperature``, mode ``coefficient``)::
+
+      "external_convection": {"patches": ["Cover_outer", ".*_outer"],
+                              "Ta": 300, "h": 8}
+
+  ``patches`` entries are regexes matched against generated patch names.
+* ``"initial_conditions"``: ``{"T": 300.0, "p": 101325.0}``.
+* ``"heat_sources"``: ``{"<region or zone key>": <total watts>}``; multiple
+  keys mapping to one region are summed.
+* ``"n_procs"`` (or ``"parallel": {"nProcs": N}``): MPI ranks for
+  ``decomposeParDict`` and ``Allrun`` (default 8).
+* ``"endTime"`` / ``"writeInterval"`` / ``"purgeWrite"``: controlDict
+  overrides (defaults 500 / 50 / 0).
 """
 
 from __future__ import annotations
@@ -87,6 +116,35 @@ class HeatSourceSpec:
 
 
 @dataclass
+class MaterialSpec:
+    """Per-region material / thermophysical property overrides.
+
+    Solid regions use ``rho`` / ``cp`` / ``kappa``; the fluid region uses
+    ``mu`` / ``pr`` / ``cp``.  ``None`` keeps the built-in default.
+    """
+
+    region_name: str  # sanitized OpenFOAM region name
+    rho: float | None = None
+    cp: float | None = None
+    kappa: float | None = None
+    mu: float | None = None
+    pr: float | None = None
+    mol_weight: float | None = None
+
+
+@dataclass
+class ExternalConvectionSpec:
+    """Outer-wall convection BC (externalWallHeatFluxTemperature)."""
+
+    patterns: list[str]  # regexes matched against generated patch names
+    ta: float = 300.0    # ambient temperature [K]
+    h: float = 10.0      # heat transfer coefficient [W/(m2 K)]
+
+    def matches(self, patch_name: str) -> bool:
+        return any(re.search(p, patch_name) for p in self.patterns)
+
+
+@dataclass
 class RegionsConfig:
     path: Path
     specs: list[RegionSpec]
@@ -94,6 +152,21 @@ class RegionsConfig:
     zone_map: dict[str, tuple[str, str]]
     mrf_regions: list[MrfRegionSpec] = field(default_factory=list)
     heat_sources: list[HeatSourceSpec] = field(default_factory=list)
+    materials: list[MaterialSpec] = field(default_factory=list)
+    external_convection: ExternalConvectionSpec | None = None
+    gravity: tuple[float, float, float] | None = None
+    initial_t: float | None = None
+    initial_p: float | None = None
+    n_procs: int | None = None
+    end_time: int | None = None
+    write_interval: int | None = None
+    purge_write: int | None = None
+
+    def material_for(self, foam_name: str) -> MaterialSpec | None:
+        for m in self.materials:
+            if m.region_name == foam_name:
+                return m
+        return None
 
     def foam_name_for(self, zone_name: str) -> str | None:
         hit = self.zone_map.get(zone_name)
@@ -422,6 +495,45 @@ def _parse_mrf_regions(
     return out
 
 
+def _region_key_matcher(
+    specs: list[RegionSpec],
+    *,
+    solids_only: bool = True,
+):
+    """Build a ``key → RegionSpec`` matcher for JSON region references.
+
+    Matches by sanitized foam name, raw/sanitized cell-zone name, and a
+    last-resort substring match (same rules for ``heat_sources`` and
+    ``materials``).
+    """
+    by_foam_name: dict[str, RegionSpec] = {}
+    by_zone: dict[str, RegionSpec] = {}
+    for s in specs:
+        if solids_only and s.region_type != "solid":
+            continue
+        by_foam_name[s.name] = s
+        for cz in s.cell_zones:
+            by_zone[_sanitize_patch_name(cz).lower()] = s
+            by_zone[cz.lower()] = s
+
+    def match(key: str) -> RegionSpec | None:
+        k = key.strip()
+        if not k:
+            return None
+        spec = by_foam_name.get(_sanitize_patch_name(k)) or by_foam_name.get(k)
+        if spec is None:
+            spec = by_zone.get(_sanitize_patch_name(k).lower())
+        if spec is None:
+            spec = by_zone.get(k.lower())
+        if spec is None:
+            for fname, s in by_foam_name.items():
+                if k.lower() in fname.lower() or fname.lower() in k.lower():
+                    return s
+        return spec
+
+    return match
+
+
 def _parse_heat_sources(
     data: dict[str, Any],
     specs: list[RegionSpec],
@@ -436,21 +548,13 @@ def _parse_heat_sources(
         }
 
     Keys are matched to solid RegionSpec names (sanitized) or their CGNS
-    cell-zone names.  Values are total power in watts.
+    cell-zone names.  Values are total power in watts; several keys may
+    resolve to the same region (powers are summed by the writer).
     """
     raw = data.get("heat_sources")
     if not isinstance(raw, dict):
         return []
-    # Build lookup: sanitized region name → spec, and cell_zone → spec
-    by_foam_name: dict[str, RegionSpec] = {}
-    by_zone: dict[str, RegionSpec] = {}
-    for s in specs:
-        if s.region_type != "solid":
-            continue
-        by_foam_name[s.name] = s
-        for cz in s.cell_zones:
-            by_zone[_sanitize_patch_name(cz).lower()] = s
-            by_zone[cz.lower()] = s
+    match = _region_key_matcher(specs, solids_only=True)
 
     out: list[HeatSourceSpec] = []
     for key, val in raw.items():
@@ -460,26 +564,103 @@ def _parse_heat_sources(
         power = float(val)
         if power <= 0:
             continue
-        # Match by sanitized name (case-insensitive) or raw zone name
-        spec = by_foam_name.get(_sanitize_patch_name(k))
-        if spec is None:
-            spec = by_foam_name.get(k)
-        if spec is None:
-            spec = by_zone.get(_sanitize_patch_name(k).lower())
-        if spec is None:
-            spec = by_zone.get(k.lower())
-        if spec is None:
-            # Fuzzy: try token match
-            for fname, s in by_foam_name.items():
-                if k.lower() in fname.lower() or fname.lower() in k.lower():
-                    spec = s
-                    break
+        spec = match(k)
         if spec is None:
             raise ValueError(
                 f"heat_sources key {k!r} does not match any solid region"
             )
         out.append(HeatSourceSpec(region_name=spec.name, power=power))
     return out
+
+
+def _parse_materials(
+    data: dict[str, Any],
+    specs: list[RegionSpec],
+) -> list[MaterialSpec]:
+    """Parse ``materials`` property overrides.
+
+    Format::
+
+        "materials": {
+            "solid_region.Cu_block": {"rho": 8960, "Cp": 385, "kappa": 390},
+            "air": {"mu": 1.846e-5, "Pr": 0.706, "Cp": 1006.43}
+        }
+
+    Keys match regions like ``heat_sources`` (both fluid and solid
+    regions are eligible).  Any subset of properties may be given;
+    missing ones keep the built-in defaults.
+    """
+    raw = data.get("materials")
+    if not isinstance(raw, dict):
+        return []
+    match = _region_key_matcher(specs, solids_only=False)
+
+    out: list[MaterialSpec] = []
+    for key, val in raw.items():
+        k = str(key).strip()
+        if not k or not isinstance(val, dict):
+            continue
+        spec = match(k)
+        if spec is None:
+            raise ValueError(
+                f"materials key {k!r} does not match any region"
+            )
+
+        def _f(*names: str) -> float | None:
+            for n in names:
+                if n in val and val[n] is not None:
+                    return float(val[n])
+            return None
+
+        out.append(
+            MaterialSpec(
+                region_name=spec.name,
+                rho=_f("rho", "density"),
+                cp=_f("Cp", "cp"),
+                kappa=_f("kappa", "k", "conductivity"),
+                mu=_f("mu", "viscosity"),
+                pr=_f("Pr", "pr"),
+                mol_weight=_f("molWeight", "mol_weight"),
+            )
+        )
+    return out
+
+
+def _parse_external_convection(data: dict[str, Any]) -> ExternalConvectionSpec | None:
+    """Parse ``external_convection`` outer-wall convection BC.
+
+    Format::
+
+        "external_convection": {
+            "patches": ["Cover_outer", ".*_outer"],
+            "Ta": 300,
+            "h": 8
+        }
+
+    ``patches`` entries are regexes matched against generated patch names.
+    """
+    raw = data.get("external_convection")
+    if not isinstance(raw, dict):
+        return None
+    pats = raw.get("patches") or raw.get("patterns") or []
+    if isinstance(pats, str):
+        pats = [pats]
+    pats = [str(p) for p in pats if str(p).strip()]
+    if not pats:
+        return None
+    return ExternalConvectionSpec(
+        patterns=pats,
+        ta=float(raw.get("Ta", raw.get("ta", 300.0))),
+        h=float(raw.get("h", raw.get("htc", 10.0))),
+    )
+
+
+def _parse_optional_vec3(data: dict[str, Any], *keys: str) -> tuple[float, float, float] | None:
+    for k in keys:
+        v = data.get(k)
+        if v is not None:
+            return _as_vec3(v, label=k)
+    return None
 
 
 def load_regions_config(
@@ -524,12 +705,51 @@ def load_regions_config(
 
     mrf_regions = _parse_mrf_regions(data, zone_names)
     heat_sources = _parse_heat_sources(data, specs)
+    materials = _parse_materials(data, specs)
+    external_convection = _parse_external_convection(data)
+    gravity = _parse_optional_vec3(data, "g", "gravity")
+
+    initial_t: float | None = None
+    initial_p: float | None = None
+    ic = data.get("initial_conditions") or data.get("initial")
+    if isinstance(ic, dict):
+        if ic.get("T") is not None:
+            initial_t = float(ic["T"])
+        if ic.get("p") is not None:
+            initial_p = float(ic["p"])
+
+    n_procs: int | None = None
+    par = data.get("parallel")
+    if isinstance(par, dict) and par.get("nProcs") is not None:
+        n_procs = int(par["nProcs"])
+    elif isinstance(par, (int, float)):
+        n_procs = int(par)
+    if data.get("n_procs") is not None:
+        n_procs = int(data["n_procs"])
+    if data.get("nProcs") is not None:
+        n_procs = int(data["nProcs"])
+
+    def _opt_int(*keys: str) -> int | None:
+        for k in keys:
+            if data.get(k) is not None:
+                return int(data[k])
+        return None
+
     return RegionsConfig(
         path=p,
         specs=specs,
         zone_map=zone_map,
         mrf_regions=mrf_regions,
         heat_sources=heat_sources,
+        materials=materials,
+        external_convection=external_convection,
+        gravity=gravity,
+        initial_t=initial_t,
+        initial_p=initial_p,
+        n_procs=n_procs,
+        end_time=_opt_int("endTime", "end_time"),
+        write_interval=_opt_int("writeInterval", "write_interval"),
+        purge_write=_opt_int("purgeWrite", "purge_write"),
     )
 
 
@@ -539,7 +759,7 @@ def load_sidecar_regions(
     *,
     required: bool = False,
 ) -> RegionsConfig | None:
-    """Load ``<cgns>.json`` if present (required for ``--cht`` / ``--cht-direct``)."""
+    """Load ``<cgns>.json`` if present (required for ``--cht-direct``)."""
     path = find_regions_json(cgns_path)
     if path is None:
         if required:

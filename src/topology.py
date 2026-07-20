@@ -61,6 +61,9 @@ class Patch:
     sample_region: str | None = None
     sample_patch: str | None = None
     neighbour_patch: str | None = None
+    #: Original CGNS BCType string (e.g. "BCWall", "BCInflow") when the
+    #: patch originates from a named CGNS BC; used to pick field BCs.
+    cgns_bc_type: str | None = None
 
 
 @dataclass
@@ -780,6 +783,7 @@ def _assemble_ordered_mesh(
                 sample_region=extras.get("sample_region"),
                 sample_patch=extras.get("sample_patch"),
                 neighbour_patch=extras.get("neighbour_patch"),
+                cgns_bc_type=extras.get("cgns_bc_type"),
             )
         )
         cursor += int(face_ids.size)

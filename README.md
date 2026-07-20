@@ -17,8 +17,8 @@ src/                   # 转换器实现（Python 包，导入名 `src`）
 ├── reader.py          # 基于 h5py 的 CGNS 读取（CPEX-0001 / SIDS-to-HDF5）
 ├── topology.py        # NGON / NFACE → OpenFOAM polyMesh 拓扑与重排
 ├── couplings.py       # 扫描流-流 / 流-固 / 固-固耦合界面对
-├── regions_config.py  # 同名 JSON 中的 fluid/solid 区域定义
-├── cht_case.py        # chtMultiRegionSimpleFoam 脚手架（mono + split）
+├── regions_config.py  # 同名 JSON 中的区域/材料/热源/重力/并行等配置
+├── cht_case.py        # CHT 各文件模板（thermo / fv* / 0 场 / MRF）
 ├── cht_direct.py      # 一步 CGNS -> 多区域 CHT
 ├── writer.py          # OpenFOAM polyMesh / system / constant / 0 文件生成
 ├── convert.py         # 高层流水线（reader → topology → writer [→ CHT]）
@@ -67,17 +67,19 @@ python3 -m src --openfoam-native path/to/case.cgns /tmp/myCase
 python3 -m src --scan path/to/case.cgns
 python3 -m src --scan path/to/case.cgns --report couplings.json
 
-# 转换并生成 CHT 脚手架（mono + Allrun.pre/splitMeshRegions）
-python3 -m src --cht path/to/case.cgns /tmp/myChtCase
-
 # 一步到位：CGNS -> 多区域 chtMultiRegionSimpleFoam（无需 split）
 python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 ```
 
 ### 耦合扫描与 CHT 模式
 
-`--cht` / `--cht-direct` **必须**在 CGNS 旁提供同名 JSON（`mesh.cgns` → `mesh.json`），
-用 foam2thermal 风格的 `regions` 声明流体/固体区域及其 `cellZones`。
+`--cht-direct` **必须**在 CGNS 旁提供同名 JSON（`mesh.cgns` → `mesh.json`），
+用 `fluid_regions` / `solid_regions` 声明流体/固体区域（foam2thermal 风格
+的 `regions` 声明也兼容）。
+
+> **注**：旧的 `--cht`（mono + `splitMeshRegions` 两阶段）模式已移除——
+> 该路径不会把流-固界面转成 `mappedWall`，生成的脚手架无法直接共轭耦合。
+> 请统一使用 `--cht-direct`。
 
 界面方法（按区域类型强制）：
 
@@ -89,7 +91,6 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 | 开关 | 作用 |
 |------|------|
 | `--scan` | 读取 CGNS zone / BC，输出流-流、流-固、固-固耦合关系与界面对（有同名 JSON 则用其区域定义） |
-| `--cht` | mono polyMesh + CHT 脚手架；`cellZones` 按 JSON 区域名合并；`Allrun.pre` 跑 `splitMeshRegions` |
 | `--cht-direct` | **一步**写出 `constant/<region>/polyMesh`（JSON 区域合并）；流-流 `cyclicAMI`，流-固/固-固 `mappedWall` |
 | `--report PATH` | 将扫描结果写为 JSON |
 | `--solid-pattern` / `--fluid-pattern` | 无 JSON 时覆盖固体 / 流体 zone 命名规则（可重复） |
@@ -116,6 +117,32 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 `air`**（`constant/air/polyMesh`，域内流-流界面为 `cyclicAMI`）；
 每个固体 zone 各自一个区域（sanitized 名）。不另建名为 `fluid` 的区域。
 
+同名 JSON 还支持以下可选键（完整示例见
+`tests/laptop_thermal_steady_scaled_v3_orig_BCs_fix.json`）：
+
+| 键 | 作用 |
+|----|------|
+| `"g"` / `"gravity"` | 重力矢量，写入 `constant/g`（默认 `(0 0 -9.81)`） |
+| `"heat_sources"` | `{"<区域或 zone 名>": <总功率 W>}`；同区域多个键会**求和**；写为 `scalarSemiImplicitSource` + `volumeMode absolute`（OpenFOAM 按单元体积自动摊成 W/m³） |
+| `"materials"` | 按区域覆盖物性：固体 `rho`/`Cp`/`kappa`/`molWeight`，流体 `air` 可覆盖 `mu`/`Pr`/`Cp`/`molWeight`（未给的项用内置默认：空气 / 铝） |
+| `"external_convection"` | `{"patches": [正则...], "Ta": 300, "h": 8}`；命中的外壁面写 `externalWallHeatFluxTemperature`（`mode coefficient`） |
+| `"initial_conditions"` | `{"T": 300.0, "p": 101325.0}` 全局初值 |
+| `"n_procs"`（或 `"parallel": {"nProcs": N}`） | MPI 核数，同时写进 `decomposeParDict` 与 `Allrun`（默认 8） |
+| `"endTime"` / `"writeInterval"` / `"purgeWrite"` | `controlDict` 覆盖（默认 500 / 50 / 0） |
+| `"mrf_regions"` | 见下文 |
+
+边界条件自动生成规则（`0/<region>/`）：
+
+- 耦合界面：mappedWall → `compressible::turbulentTemperatureRadCoupledMixed`（T）/ `noSlip`（U）/ `fixedFluxPressure`（p_rgh）；cyclicAMI → 同名 constraint 类型。
+- 开口：patch 名以 `open` 开头，**或** CGNS BC 类型为 `BCInflow`/`BCOutflow`/`BCFarfield` 等 → `prghTotalPressure` + `pressureInletOutletVelocity` + T `inletOutlet`（转换时会打印警告提醒校核数值）。
+- `symmetryPlane` / `empty` / `wedge` / `cyclic` 等 constraint patch 自动写同名场类型。
+- 其余壁面：U `noSlip`、T `zeroGradient`（绝热），可用 `"external_convection"` 改成对外散热。
+
+求解设置要点（自动生成）：
+
+- `SIMPLE`：`momentumPredictor true`、`nNonOrthogonalCorrectors 1`、显式 `residualControl`（流体 `p_rgh/U/h`，固体 `h`）。
+- `div(phi,U/h/K)` 默认一阶 `bounded Gauss upwind` 保证起步稳健；`fvSchemes` 中附有二阶 `linearUpwind` 注释模板，收敛后可切换。
+
 可选 MRF（写出 `constant/air/MRFProperties`，叶轮 patch 用 `movingWallVelocity`）：
 
 ```json
@@ -136,11 +163,9 @@ python3 -m src --cht-direct path/to/case.cgns /tmp/myChtReady
 ```
 
 `origin` 也可为 `"centroid"`（用该 zone 顶点坐标均值）。
+MRF 的 `cellZone` 必须是 `fluid_regions` 中的 CGNS zone，否则转换即报错。
 
 ```bash
-# --cht（两阶段）
-cd /tmp/myChtCase && ./Allrun.pre && ./Allrun
-
 # --cht-direct（一步）
 cd /tmp/myChtReady && ./Allrun
 ```
@@ -179,9 +204,6 @@ print(mesh.n_cells, mesh.owner.size, len(mesh.patches))
 # 仅扫描耦合
 report = scan_file("case.cgns", report_path="couplings.json")
 print(report.fluid_regions, len(report.couplings))
-
-# 转换 + CHT 脚手架
-mesh = convert_file("case.cgns", "cht_out", cht=True)
 
 # 一步多区域 CHT
 from src import convert_cht_direct

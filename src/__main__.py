@@ -20,8 +20,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="cgns2foam",
         description=(
             "Convert a CFD CGNS (HDF5) file to an OpenFOAM project directory. "
-            "Optionally scan fluid/solid couplings and emit "
-            "chtMultiRegionSimpleFoam scaffolding. "
+            "Optionally scan fluid/solid couplings and emit a ready-to-run "
+            "chtMultiRegionSimpleFoam case. "
             "Built on top of h5py + numpy."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -30,7 +30,6 @@ examples:
   %(prog)s mesh.cgns out_case
   %(prog)s --scan mesh.cgns
   %(prog)s --scan mesh.cgns --report couplings.json
-  %(prog)s --cht mesh.cgns out_cht_case
   %(prog)s --cht-direct mesh.cgns out_cht_ready
 """.rstrip(),
     )
@@ -65,16 +64,7 @@ examples:
         help=(
             "Scan CGNS zones for fluid/solid regions and coupling interface "
             "pairs (fluid-fluid / fluid-solid / solid-solid). Does not write "
-            "a polyMesh unless --cht is also set."
-        ),
-    )
-    p.add_argument(
-        "--cht",
-        action="store_true",
-        help=(
-            "Mono polyMesh + chtMultiRegionSimpleFoam scaffolding "
-            "(Allrun.pre runs splitMeshRegions). Requires sidecar "
-            "<cgns>.json listing fluid/solid regions. Implies a coupling scan."
+            "a polyMesh."
         ),
     )
     p.add_argument(
@@ -91,7 +81,7 @@ examples:
         metavar="PATH",
         default=None,
         help="Write coupling scan JSON to PATH (default: stdout only for --scan; "
-             "for --cht also writes <output>/coupling_scan.json).",
+             "for --cht-direct also copies <output>/coupling_scan.json).",
     )
     p.add_argument(
         "--solid-pattern",
@@ -117,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: not a file: {cgns_path}", file=sys.stderr)
         return 2
 
-    if args.scan and not args.cht and not args.cht_direct:
+    if args.scan and not args.cht_direct:
         report_path = args.report
         scan_file(
             cgns_path,
@@ -127,10 +117,6 @@ def main(argv: list[str] | None = None) -> int:
             fluid_patterns=args.fluid_pattern,
         )
         return 0
-
-    if args.cht and args.cht_direct:
-        print("error: use either --cht or --cht-direct, not both", file=sys.stderr)
-        return 2
 
     out_dir = args.output_dir
     if out_dir is None:
@@ -143,13 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         out_dir,
         verbose=not args.quiet,
         write_options=write_opts,
-        cht=args.cht or False,
         cht_direct=args.cht_direct or False,
         solid_patterns=args.solid_pattern,
         fluid_patterns=args.fluid_pattern,
     )
 
-    if (args.cht or args.cht_direct) and args.report:
+    if args.cht_direct and args.report:
         from pathlib import Path
         import shutil
         src = Path(out_dir) / "coupling_scan.json"

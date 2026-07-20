@@ -3,7 +3,7 @@
 Couplings are inferred from FaceCenter BC geometry: same-named (or geometrically
 coincident) boundary faces shared by two zones form an interface.
 
-When a sidecar ``<cgns>.json`` is supplied (required for ``--cht`` /
+When a sidecar ``<cgns>.json`` is supplied (required for
 ``--cht-direct``), zone types and OpenFOAM region names come from that file.
 Interface methods are then forced by region types:
 

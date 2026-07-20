@@ -1,19 +1,17 @@
-"""Generate chtMultiRegionSimpleFoam case scaffolding from a mesh + coupling scan.
+"""Templates for chtMultiRegionSimpleFoam case files.
 
-Writes regionProperties, per-region thermo/system/0.orig stubs, CHT controlDict,
-AMI createPatchDict (when needed), and Allrun / Allrun.pre / Allclean scripts.
-Mesh prep (``splitMeshRegions`` / optional ``createPatch``) is deferred to
-Allrun.pre inside an OpenFOAM v2412 environment.
+Holds the per-region thermophysicalProperties / turbulenceProperties /
+radiationProperties, fvSchemes / fvSolution / fvOptions, 0/ field stubs,
+controlDict, MRFProperties and decomposeParDict builders used by
+:mod:`src.cht_direct` (the one-step multi-region writer).
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from .couplings import CouplingMethod, CouplingReport
-from .topology import Mesh
+from .regions_config import MaterialSpec
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +84,22 @@ _DEFAULT_SOLID_MAT: dict[str, Any] = {
 }
 
 
-def _thermophysical_fluid() -> str:
+def _thermophysical_fluid(mat: MaterialSpec | None = None) -> str:
     t = _DEFAULT_FLUID_MAT["thermoType"]
-    m = _DEFAULT_FLUID_MAT["mixture"]
+    m = {
+        "specie": dict(_DEFAULT_FLUID_MAT["mixture"]["specie"]),
+        "thermodynamics": dict(_DEFAULT_FLUID_MAT["mixture"]["thermodynamics"]),
+        "transport": dict(_DEFAULT_FLUID_MAT["mixture"]["transport"]),
+    }
+    if mat is not None:
+        if mat.mol_weight is not None:
+            m["specie"]["molWeight"] = mat.mol_weight
+        if mat.cp is not None:
+            m["thermodynamics"]["Cp"] = mat.cp
+        if mat.mu is not None:
+            m["transport"]["mu"] = mat.mu
+        if mat.pr is not None:
+            m["transport"]["Pr"] = mat.pr
     return (
         _foam_header("dictionary", "thermophysicalProperties", "constant")
         + f"""
@@ -127,9 +138,23 @@ mixture
     )
 
 
-def _thermophysical_solid() -> str:
+def _thermophysical_solid(mat: MaterialSpec | None = None) -> str:
     t = _DEFAULT_SOLID_MAT["thermoType"]
-    m = _DEFAULT_SOLID_MAT["mixture"]
+    m = {
+        "specie": dict(_DEFAULT_SOLID_MAT["mixture"]["specie"]),
+        "thermodynamics": dict(_DEFAULT_SOLID_MAT["mixture"]["thermodynamics"]),
+        "transport": dict(_DEFAULT_SOLID_MAT["mixture"]["transport"]),
+        "equationOfState": dict(_DEFAULT_SOLID_MAT["mixture"]["equationOfState"]),
+    }
+    if mat is not None:
+        if mat.mol_weight is not None:
+            m["specie"]["molWeight"] = mat.mol_weight
+        if mat.cp is not None:
+            m["thermodynamics"]["Cp"] = mat.cp
+        if mat.kappa is not None:
+            m["transport"]["kappa"] = mat.kappa
+        if mat.rho is not None:
+            m["equationOfState"]["rho"] = mat.rho
     return (
         _foam_header("dictionary", "thermophysicalProperties", "constant")
         + f"""
@@ -183,7 +208,12 @@ simulationType laminar;
     )
 
 
-def _control_dict_cht(*, end_time: int = 500, write_interval: int = 50) -> str:
+def _control_dict_cht(
+    *,
+    end_time: int = 500,
+    write_interval: int = 50,
+    purge_write: int = 0,
+) -> str:
     return (
         _foam_header("dictionary", "controlDict")
         + f"""
@@ -198,7 +228,7 @@ deltaT          1;
 
 writeControl    timeStep;
 writeInterval   {write_interval};
-purgeWrite      0;
+purgeWrite      {purge_write};
 
 writeFormat     binary;
 writePrecision  8;
@@ -208,9 +238,15 @@ timeFormat      general;
 timePrecision   8;
 runTimeModifiable true;
 
-functions
-{{
-}}
+// Convergence is driven by residualControl in system/<region>/fvSolution;
+// per-field residuals are also printed to the solver log.  To monitor
+// fields, uncomment e.g.:
+//
+// functions
+// {{
+//     // min/max per region (region name as in constant/regionProperties)
+//     // #includeFunc fieldMinMax(region=air,fields=(T U p_rgh))
+// }}
 
 // ************************************************************************* //
 """
@@ -223,6 +259,14 @@ def _fv_schemes_fluid() -> str:
         + """
 ddtSchemes { default steadyState; }
 gradSchemes { default Gauss linear; }
+
+// First-order upwind for robust start-up.  Once the solution has settled
+// (~100-200 iterations), switch div(phi,...) to second order for accuracy:
+//
+//     div(phi,U)      bounded Gauss linearUpwind grad(U);
+//     div(phi,h)      bounded Gauss linearUpwind grad(h);
+//     div(phi,K)      bounded Gauss linearUpwind grad(K);
+//
 divSchemes
 {
     div(phi,U)      bounded Gauss upwind;
@@ -248,9 +292,9 @@ def _fv_schemes_solid() -> str:
 ddtSchemes { default steadyState; }
 gradSchemes { default Gauss linear; }
 divSchemes { default Gauss linear; }
-laplacianSchemes { default Gauss linear limited 0.33; }
+laplacianSchemes { default Gauss linear limited 0.333; }
 interpolationSchemes { default linear; }
-snGradSchemes { default limited 0.33; }
+snGradSchemes { default limited 0.333; }
 
 // ************************************************************************* //
 """
@@ -280,8 +324,14 @@ solvers
 }
 SIMPLE
 {
-    nNonOrthogonalCorrectors 0;
-    residualControl { default 1e-5; }
+    nNonOrthogonalCorrectors 1;
+    momentumPredictor true;
+    residualControl
+    {
+        p_rgh           1e-5;
+        U               1e-5;
+        h               1e-6;
+    }
 }
 relaxationFactors
 {
@@ -310,7 +360,11 @@ solvers
 }
 SIMPLE
 {
-    residualControl { default 1e-5; }
+    nNonOrthogonalCorrectors 1;
+    residualControl
+    {
+        h               1e-6;
+    }
 }
 relaxationFactors
 {
@@ -366,9 +420,10 @@ limitU
 def _fv_options_solid_heat(power_watts: float) -> str:
     """Volumetric heat source for a solid region (total power in watts).
 
-    Uses ``semiImplicitSource`` with a constant volumetric source rate.
-    The actual power density (W/m³) is computed by OpenFOAM from the
-    cell volumes when ``selectionMode all`` is used with ``Vdot`` mode.
+    ``volumeMode absolute`` makes OpenFOAM interpret ``explicit`` as the
+    *total* source integrated over the selected cells (watts for the
+    enthalpy equation); the per-volume density is derived from the cell
+    volumes internally.
     """
     return (
         _foam_header("dictionary", "fvOptions", "system")
@@ -378,7 +433,7 @@ heatSource
     type            scalarSemiImplicitSource;
     active          yes;
     selectionMode   all;
-    volumeMode      specific;
+    volumeMode      absolute;
     sources
     {{
         h
@@ -495,17 +550,51 @@ def _is_mapped_wall_patch(name: str, patch_types: dict[str, str] | None) -> bool
     return "_to_" in name
 
 
+# Geometric constraint patch types: the field entry MUST repeat the patch
+# type or OpenFOAM aborts at startup with a type mismatch.
+_CONSTRAINT_PATCH_TYPES = ("symmetryPlane", "empty", "wedge", "cyclic")
+
+
+def _constraint_rule(name: str, patch_types: dict[str, str] | None) -> str | None:
+    """Field rule for constraint patches (``symmetryPlane``/``empty``/...)."""
+    if not patch_types:
+        return None
+    ptype = patch_types.get(name)
+    if ptype in _CONSTRAINT_PATCH_TYPES:
+        return f"type {ptype};"
+    return None
+
+
+def _is_opening_patch(name: str, opening_patches: set[str] | None) -> bool:
+    """Total-pressure opening: ``open*`` name or CGNS inlet/outlet BC."""
+    if opening_patches and name in opening_patches:
+        return True
+    return name == "open" or name.startswith("open")
+
+
 def _field_T(
     region_type: str,
     patches: list[str],
     T0: float = 300.0,
     *,
     patch_types: dict[str, str] | None = None,
+    opening_patches: set[str] | None = None,
+    convection_patches: dict[str, tuple[float, float]] | None = None,
 ) -> str:
+    """0/<region>/T.
+
+    *convection_patches* maps patch name → ``(Ta, h)`` and selects
+    ``externalWallHeatFluxTemperature`` (mode ``coefficient``) for outer
+    walls cooled by ambient convection.
+    """
     kappa = "fluidThermo" if region_type == "fluid" else "solidThermo"
+    convection_patches = convection_patches or {}
     blocks: list[str] = []
     for p in patches:
-        if _is_cyclic_ami_patch(p, patch_types):
+        rule = _constraint_rule(p, patch_types)
+        if rule is not None:
+            blocks.append(f"    {p}\n    {{\n        {rule}\n    }}")
+        elif _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
         elif _is_mapped_wall_patch(p, patch_types):
             blocks.append(
@@ -517,7 +606,21 @@ def _field_T(
         value           $internalField;
     }}"""
             )
-        elif p == "open" or p.startswith("open"):
+        elif p in convection_patches:
+            ta, htc = convection_patches[p]
+            blocks.append(
+                f"""    {p}
+    {{
+        type            externalWallHeatFluxTemperature;
+        mode            coefficient;
+        Ta              constant {ta};
+        h               uniform {htc};
+        kappaMethod     {kappa};
+        qr              none;
+        value           $internalField;
+    }}"""
+            )
+        elif _is_opening_patch(p, opening_patches):
             blocks.append(
                 f"""    {p}
     {{
@@ -557,11 +660,15 @@ def _field_U(
     *,
     patch_types: dict[str, str] | None = None,
     moving_wall_patches: list[str] | None = None,
+    opening_patches: set[str] | None = None,
 ) -> str:
     moving = set(moving_wall_patches or [])
     blocks: list[str] = []
     for p in patches:
-        if _is_cyclic_ami_patch(p, patch_types):
+        rule = _constraint_rule(p, patch_types)
+        if rule is not None:
+            blocks.append(f"    {p}\n    {{\n        {rule}\n    }}")
+        elif _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
         elif _is_mapped_wall_patch(p, patch_types):
             blocks.append(
@@ -570,7 +677,7 @@ def _field_U(
         type            noSlip;
     }}"""
             )
-        elif p.startswith("open"):
+        elif _is_opening_patch(p, opening_patches):
             blocks.append(
                 f"""    {p}
     {{
@@ -618,12 +725,16 @@ def _field_p(
     p0: float = 101325.0,
     *,
     patch_types: dict[str, str] | None = None,
+    opening_patches: set[str] | None = None,
 ) -> str:
     blocks: list[str] = []
     for p in patches:
-        if _is_cyclic_ami_patch(p, patch_types):
+        rule = _constraint_rule(p, patch_types)
+        if rule is not None:
+            blocks.append(f"    {p}\n    {{\n        {rule}\n    }}")
+        elif _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
-        elif p == "open" or p.startswith("open"):
+        elif _is_opening_patch(p, opening_patches):
             blocks.append(
                 f"""    {p}
     {{
@@ -663,12 +774,16 @@ def _field_p_rgh(
     p0: float = 101325.0,
     *,
     patch_types: dict[str, str] | None = None,
+    opening_patches: set[str] | None = None,
 ) -> str:
     blocks: list[str] = []
     for p in patches:
-        if _is_cyclic_ami_patch(p, patch_types):
+        rule = _constraint_rule(p, patch_types)
+        if rule is not None:
+            blocks.append(f"    {p}\n    {{\n        {rule}\n    }}")
+        elif _is_cyclic_ami_patch(p, patch_types):
             blocks.append(f"    {p}\n    {{\n        type            cyclicAMI;\n    }}")
-        elif p == "open" or p.startswith("open"):
+        elif _is_opening_patch(p, opening_patches):
             blocks.append(
                 f"""    {p}
     {{
@@ -704,44 +819,6 @@ boundaryField
     )
 
 
-def _create_patch_ami(
-    pairs: list[tuple[str, str]],
-    axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
-) -> str:
-    blocks: list[str] = []
-    for master, slave in pairs:
-        for name, nbr in ((master, slave), (slave, master)):
-            blocks.append(
-                f"""    {{
-        name {name};
-        patchInfo
-        {{
-            type            cyclicAMI;
-            neighbourPatch  {nbr};
-            transform       noOrdering;
-            matchTolerance  0.001;
-            rotationAxis    ({axis[0]} {axis[1]} {axis[2]});
-        }}
-        constructFrom patches;
-        patches ({name});
-    }}"""
-            )
-    body = "\n".join(blocks)
-    return (
-        _foam_header("dictionary", "createPatchDict")
-        + f"""
-pointSync false;
-
-patches
-(
-{body}
-);
-
-// ************************************************************************* //
-"""
-    )
-
-
 # ---------------------------------------------------------------------------
 # Allrun scripts
 # ---------------------------------------------------------------------------
@@ -760,68 +837,6 @@ method          scotch;
     )
 
 
-def _allrun_pre_full(
-    fluid: list[str],
-    solid: list[str],
-    *,
-    has_ami: bool,
-) -> str:
-    region_names = fluid + solid
-    lines = [
-        "#!/bin/sh",
-        "set -e",
-        'cd "${0%/*}" || exit',
-        ". ${WM_PROJECT_DIR:?}/bin/tools/RunFunctions",
-        "#------------------------------------------------------------------------------",
-        "# cgns2foam – CHT mesh prep for chtMultiRegionSimpleFoam",
-        "",
-    ]
-    if has_ami:
-        lines.append("runApplication -s createPatch createPatch -overwrite")
-    lines.extend(
-        [
-            "cp -f system/regionProperties constant/regionProperties",
-            "runApplication -s splitMeshRegions splitMeshRegions -cellZonesOnly -overwrite",
-            "",
-            "# Deploy per-region constant/system and CHT controlDict",
-            f"for region in {' '.join(region_names)}; do",
-            '    mkdir -p "constant/${region}" "system/${region}"',
-            '    cp -f constant.orig/"${region}"/* "constant/${region}/" 2>/dev/null || true',
-            '    cp -f system.orig/"${region}"/* "system/${region}/" 2>/dev/null || true',
-            "done",
-            "cp -f system/controlDict.cht system/controlDict",
-            "",
-            "restore0Dir -allRegions",
-            "",
-        ]
-    )
-    for reg in solid:
-        for f in ("U", "p_rgh", "k", "epsilon", "nut", "alphat"):
-            lines.append(f'rm -f "0/{reg}/{f}" 2>/dev/null || true')
-    lines.append("")
-    lines.append("#------------------------------------------------------------------------------")
-    return "\n".join(lines) + "\n"
-
-
-def _allrun(*, n_procs: int = 8) -> str:
-    return f"""#!/bin/sh
-set -e
-cd "${{0%/*}}" || exit
-. ${{WM_PROJECT_DIR:?}}/bin/tools/RunFunctions
-#------------------------------------------------------------------------------
-./Allrun.pre
-
-# Decompose and run in parallel ({n_procs} ranks)
-runApplication -o -s decomposePar decomposePar -allRegions -copyZero -force
-runParallel -o -np {n_procs} $(getApplication)
-
-# Reconstruct for post-processing
-runApplication -o -s reconstructParMesh reconstructParMesh -allRegions -constant
-runApplication -o -s reconstructPar reconstructPar -allRegions
-#------------------------------------------------------------------------------
-"""
-
-
 def _allclean() -> str:
     return """#!/bin/sh
 cd "${0%/*}" || exit
@@ -833,140 +848,3 @@ cleanCase
 
 # ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
-
-
-def write_cht_case(
-    out_dir: str | Path,
-    mesh: Mesh,
-    report: CouplingReport,
-    *,
-    end_time: int = 500,
-    write_interval: int = 50,
-    gravity: list[float] | None = None,
-) -> dict[str, Any]:
-    """Augment an already-written mono-block OpenFOAM case with CHT scaffolding.
-
-    Expects ``constant/polyMesh`` already present (from :func:`write_case`).
-    """
-    out = Path(out_dir)
-    fluid = list(report.fluid_regions)
-    solid = list(report.solid_regions)
-    if not fluid and not solid:
-        raise ValueError("Coupling report has no fluid/solid regions")
-
-    region_by_foam = {r.foam_name: r for r in report.regions}
-    bcs_by_foam: dict[str, set[str]] = {}
-    for r in report.regions:
-        bcs_by_foam.setdefault(r.foam_name, set()).update(r.bc_names)
-    patch_names = [p.name for p in mesh.patches]
-
-    # Map foam region → patches that belong to that region's original BCs
-    def patches_for_region(foam_name: str) -> list[str]:
-        bc_set = bcs_by_foam.get(foam_name) or set()
-        if not bc_set:
-            return list(patch_names)
-        owned = [
-            p for p in patch_names
-            if p in bc_set or any(p == b or p.startswith(b + "_") for b in bc_set)
-        ]
-        return owned if owned else list(patch_names)
-
-    # --- top-level system / constant ---
-    _write_text(out / "system" / "regionProperties", _region_properties(fluid, solid))
-    _write_text(out / "system" / "controlDict.cht", _control_dict_cht(
-        end_time=end_time, write_interval=write_interval,
-    ))
-    # Keep monolithic controlDict usable by mesh utilities until Allrun.pre
-    # replaces it with controlDict.cht after split.
-    _write_text(out / "constant" / "g", _gravity(gravity))
-
-    ami_pairs: list[tuple[str, str]] = []
-    for c in report.couplings:
-        if c.method != CouplingMethod.CYCLIC_AMI:
-            continue
-        # createPatch AMI only makes sense within one polyMesh before split —
-        # restrict to pairs that share an OpenFOAM region (merged cellZones).
-        if c.master_region and c.slave_region and c.master_region != c.slave_region:
-            continue
-        # Patch names in mono mesh are disambiguated; find BC-based names
-        master_patches = [
-            p.name for p in mesh.patches
-            if p.name == c.master_bc or p.name.startswith(c.master_bc + "_")
-        ]
-        slave_patches = [
-            p.name for p in mesh.patches
-            if p.name == c.slave_bc or p.name.startswith(c.slave_bc + "_")
-        ]
-        if master_patches and slave_patches:
-            ami_pairs.append((master_patches[0], slave_patches[0]))
-        else:
-            # Fall back to raw BC names (createPatch may still find them)
-            ami_pairs.append((c.master_bc, c.slave_bc))
-
-    # Dedupe AMI pairs
-    seen_ami: set[frozenset[str]] = set()
-    unique_ami: list[tuple[str, str]] = []
-    for a, b in ami_pairs:
-        key = frozenset({a, b})
-        if key in seen_ami:
-            continue
-        seen_ami.add(key)
-        unique_ami.append((a, b))
-
-    if unique_ami:
-        _write_text(out / "system" / "createPatchDict", _create_patch_ami(unique_ami))
-
-    # --- per-region staged files ---
-    for foam_name in fluid + solid:
-        reg = region_by_foam[foam_name]
-        rtype = reg.region_type
-        cdir = out / "constant.orig" / foam_name
-        sdir = out / "system.orig" / foam_name
-        odir = out / "0.orig" / foam_name
-        owned = patches_for_region(foam_name)
-
-        if rtype == "fluid":
-            _write_text(cdir / "thermophysicalProperties", _thermophysical_fluid())
-            _write_text(cdir / "turbulenceProperties", _turbulence_laminar())
-            _write_text(sdir / "fvSchemes", _fv_schemes_fluid())
-            _write_text(sdir / "fvSolution", _fv_solution_fluid())
-            _write_text(odir / "T", _field_T("fluid", owned))
-            _write_text(odir / "U", _field_U(owned))
-            _write_text(odir / "p", _field_p(owned))
-            _write_text(odir / "p_rgh", _field_p_rgh(owned))
-        else:
-            _write_text(cdir / "thermophysicalProperties", _thermophysical_solid())
-            _write_text(sdir / "fvSchemes", _fv_schemes_solid())
-            _write_text(sdir / "fvSolution", _fv_solution_solid())
-            _write_text(odir / "T", _field_T("solid", owned))
-            _write_text(odir / "p", _field_p(owned))
-
-    summary = report.to_dict()
-    summary["ami_pairs"] = [{"master": a, "slave": b} for a, b in unique_ami]
-    summary["solver"] = "chtMultiRegionSimpleFoam"
-    _write_text(out / "setup_report.json", json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
-    _write_text(out / "coupling_scan.json", json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
-
-    _write_text(out / "system" / "decomposeParDict", _decompose_par_dict(8))
-    for foam_name in fluid + solid:
-        sdir = out / "system.orig" / foam_name
-        _write_text(sdir / "decomposeParDict", _decompose_par_dict(8, location="system"))
-
-    _write_text(
-        out / "Allrun.pre",
-        _allrun_pre_full(fluid, solid, has_ami=bool(unique_ami)),
-    )
-    _write_text(out / "Allrun", _allrun(n_procs=8))
-    _write_text(out / "Allclean", _allclean())
-
-    # Make scripts executable on POSIX (no-op on Windows)
-    for name in ("Allrun", "Allrun.pre", "Allclean"):
-        path = out / name
-        try:
-            mode = path.stat().st_mode
-            path.chmod(mode | 0o111)
-        except OSError:
-            pass
-
-    return summary

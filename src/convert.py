@@ -7,7 +7,6 @@ import os
 import time
 from pathlib import Path
 
-from .cht_case import write_cht_case
 from .cht_direct import convert_cht_direct
 from .couplings import CouplingReport, format_coupling_summary, scan_couplings
 from .reader import read_cgns
@@ -22,7 +21,6 @@ def convert_file(
     *,
     verbose: bool = True,
     write_options: WriteOptions | None = None,
-    cht: bool = False,
     cht_direct: bool = False,
     solid_patterns: list[str] | None = None,
     fluid_patterns: list[str] | None = None,
@@ -32,13 +30,11 @@ def convert_file(
     Modes:
 
     * default – mono-block polyMesh
-    * ``cht=True`` – mono polyMesh + CHT scaffolding (``Allrun.pre`` runs
-      ``splitMeshRegions``); requires sidecar ``<cgns>.json`` regions
     * ``cht_direct=True`` – one-step multi-region
       ``chtMultiRegionSimpleFoam`` case (no mono mesh / no split);
       requires sidecar ``<cgns>.json``
 
-    Returns :class:`~src.topology.Mesh` for mono/cht modes, or
+    Returns :class:`~src.topology.Mesh` for the mono mode, or
     :class:`~src.couplings.CouplingReport` for ``cht_direct``.
     """
     if cht_direct:
@@ -61,47 +57,8 @@ def convert_file(
                   f"{z.n_vertices} vertices, {z.n_cells} cells, "
                   f"{len(z.bcs)} BCs")
 
-    coupling_report: CouplingReport | None = None
-    regions_config = None
-    zone_cell_zone_map: dict[str, str] | None = None
-    if cht:
-        regions_config = load_sidecar_regions(
-            cgns_path,
-            [z.name for z in case.zones],
-            required=True,
-        )
-        if verbose and regions_config is not None:
-            print(f"[cgns2foam] regions from {regions_config.path}")
-        zone_cell_zone_map = {
-            z.name: regions_config.foam_name_for(z.name) or z.name
-            for z in case.zones
-            if regions_config.foam_name_for(z.name)
-        }
-        unmatched = [
-            z.name for z in case.zones
-            if regions_config.foam_name_for(z.name) is None
-        ]
-        if unmatched and verbose:
-            print(
-                f"[cgns2foam] warning: {len(unmatched)} CGNS zone(s) not listed "
-                f"in regions JSON: "
-                f"{unmatched[:5]}{'...' if len(unmatched) > 5 else ''}"
-            )
-        t_scan = time.perf_counter()
-        coupling_report = scan_couplings(
-            case,
-            source=os.path.abspath(cgns_path),
-            solid_patterns=solid_patterns,
-            fluid_patterns=fluid_patterns,
-            regions_config=regions_config,
-        )
-        if verbose:
-            print(f"[cgns2foam] coupling scan "
-                  f"({time.perf_counter() - t_scan:.2f}s):")
-            print(format_coupling_summary(coupling_report))
-
     t1 = time.perf_counter()
-    mesh = build_mesh(case, zone_cell_zone_map=zone_cell_zone_map)
+    mesh = build_mesh(case)
     if verbose:
         print(f"[cgns2foam] mesh assembled: "
               f"{mesh.points.shape[0]} points, "
@@ -119,17 +76,6 @@ def convert_file(
         print(f"[cgns2foam] case written to {out_dir} "
               f"[{time.perf_counter() - t2:.2f}s]")
 
-    if cht and coupling_report is not None:
-        t3 = time.perf_counter()
-        summary = write_cht_case(out_dir, mesh, coupling_report)
-        if verbose:
-            print(f"[cgns2foam] CHT scaffolding written "
-                  f"({len(summary.get('fluid_regions', []))} fluid, "
-                  f"{len(summary.get('solid_regions', []))} solid, "
-                  f"{summary.get('n_couplings', 0)} couplings) "
-                  f"[{time.perf_counter() - t3:.2f}s]")
-            print(f"            next: cd {out_dir} && ./Allrun.pre  "
-                  f"(inside OpenFOAM v2412)")
     return mesh
 
 
